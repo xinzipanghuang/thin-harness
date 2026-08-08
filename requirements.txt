@@ -1,0 +1,6 @@
+# Runtime dependencies (Python >= 3.10)
+openai>=2.0          # model transport for every endpoint (OpenAI-compatible)
+peewee>=4.0          # SQLite ORM for memory (Session/Turn/Fact/Artifact)
+rich>=13.0           # terminal chat rendering
+pypdf>=4.0           # PDF document reading (documents.read)
+python-docx>=1.0     # DOCX document reading (documents.read)
