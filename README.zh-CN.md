@@ -1,5 +1,7 @@
 # 极简 Codex 风格 Agent 运行时（Minimal Codex-Style Agent Runtime）
 
+[English](./README.md) · **简体中文**
+
 *别名：`thin-harness`* —— 取自设计理念 "thin harness"（轻薄外壳）
 
 一个受 Codex agent 循环启发、刻意保持极简的通用 Python Agent 运行时——小巧、

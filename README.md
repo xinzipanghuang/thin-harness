@@ -1,5 +1,7 @@
 # Minimal Codex-Style Agent Runtime
 
+**English** · [简体中文](./README.zh-CN.md)
+
 *Also known as: `thin-harness`* — from the design principle "thin harness"
 
 A minimal, general-purpose Python agent runtime inspired by the Codex agent
