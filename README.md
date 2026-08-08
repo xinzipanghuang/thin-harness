@@ -4,36 +4,22 @@
 
 *Also known as: `thin-harness`* — from the design principle "thin harness"
 
-A minimal, general-purpose Python agent runtime inspired by the Codex agent
-loop — small, transparent, and deliberately boring:
+thin-harness is a small, general-purpose Python framework for building your
+own agent: **you define the agent and tools, it runs the loop.**
 
-> Minimal loop, rich tools, thin harness, strong environment.
-> Code defines capabilities and reliability boundaries.
-> The model decides what to do.
+- **Your agents.** Subclass `Agent`; pick the prompt, tools, and limits —
+  behavior stays under your control. No YAML.
+- **Your tools.** A typed Python function with `@tool`; auto-discovered.
+- **Your model.** Four values in `.env`, any OpenAI-compatible endpoint.
 
-**What it is.** An agent runtime you can read in an afternoon: one loop, a few
-deterministic guards, tools as typed Python functions, agents as Python
-subclasses, and a terminal chat on top.
-
-**What it is not.** Not a knowledge-base assistant, and not a framework with
-planners, critics, routers, multi-agent orchestration, or embedding-based
-tool selection. No vendor catalog: one generic `.env`, one transport (OpenAI
-SDK), any OpenAI-compatible endpoint.
-
-**Positioning.** General by default: conversational and general-knowledge
-questions are answered directly; tools are used only when the request
-actually needs the local environment (files, documents, shell, code).
-
-**Extensible by design.** A tool is one decorated Python function, an agent
-is one subclass, and a new model endpoint is one `.env` edit — nothing needs
-to be registered centrally or known by the runtime in advance. This project
-is first and foremost for developers who want to extend it with their own
-Python tools and agents.
+A document FAQ, a coding helper, or a daily assistant all run on the same
+framework — only your agent and tools change. Not a knowledge-base assistant,
+and no planners, critics, or multi-agent orchestration.
 
 ## Who this is for
 
 - **Developers who want to read and own their agent loop** — the whole
-  runtime is a handful of files; there is no framework magic to fight.
+  runtime is a handful of files; change whatever you need.
 - **Anyone who wants a local, terminal-based general assistant** that chats
   normally and can also inspect files, read documents, run commands, or write
   code — with one `.env` pointing at any OpenAI-compatible endpoint.
@@ -192,14 +178,28 @@ from `.env` by the provider layer, so an agent never configures a model:
 
 ```python
 from core.agent import Agent
+from core.tool import agent_tool
+
+
+@agent_tool
+def hello(name: str) -> str:
+    """Say hello to someone."""
+    return f"hello {name}"
 
 
 class MyAgent(Agent):
     name = "my-agent"
-    prompt_path = "prompts/agent.md"
-    tool_include = ["filesystem.*", "shell.run", "python.run"]
-    max_steps = 8
+    prompt = "You are a friendly assistant."
+    own_tools = [hello]   # private to this agent only
+
+
+agent = MyAgent()
+result = await agent.run("say hello to codex")
+print(result.text)
 ```
+
+`@agent_tool` makes a tool private to one agent; shared tools go in `tools/`
+with `@tool` (see below).
 
 Built-in agents (pick with `--agent`, default `daily`):
 

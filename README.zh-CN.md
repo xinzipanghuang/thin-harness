@@ -4,36 +4,20 @@
 
 *别名：`thin-harness`* —— 取自设计理念 "thin harness"（轻薄外壳）
 
-一个受 Codex agent 循环启发、刻意保持极简的通用 Python Agent 运行时——小巧、
-透明、没有魔法：
+thin-harness 是一个小巧、通用的 Python 框架，用来构建你自己的 Agent：
+**Agent 和工具由你定义，框架负责跑起来。**
 
-> **Minimal loop, rich tools, thin harness, strong environment.**
-> （最小循环、丰富工具、轻薄外壳、强大环境）
->
-> **Code defines capabilities and reliability boundaries.**
-> **The model decides what to do.**
-> （代码定义能力与可靠性边界，由模型决定做什么）
+- **你的 Agent。** 继承 `Agent`，自定提示词、工具和上限；行为可控，不用
+  YAML。
+- **你的工具。** 一个带类型注解的 Python 函数加 `@tool`，自动被发现。
+- **你的模型。** `.env` 四个值，任意 OpenAI 兼容端点。
 
-**它是什么。** 一个下午就能读完的 Agent 运行时：一条主循环、一组确定性防护、
-以带类型注解的 Python 函数实现的工具、以 Python 子类定义的 Agent，以及一个
-终端聊天入口。
-
-**它不是什么。** 不是知识库助手，也不是带 planner、critic、路由、多 Agent
-编排或 embedding 工具选择的框架。没有厂商目录：一个通用 `.env`、一个传输层
-（OpenAI SDK）、任意 OpenAI 兼容端点。
-
-**定位。** 默认通用：闲聊和常识问题直接回答；只有当请求确实需要本地环境
-（文件、文档、shell、代码）时才使用工具。
-
-**可扩展设计。** 一个工具就是一个装饰过的 Python 函数，一个 Agent 就是
-一个子类，一个新的模型端点就是一次 `.env` 修改——无需中心注册，运行时也
-不需要预先知道它们。这个项目首先是为**想用自己写的 Python 工具和 Agent
-去扩展它的开发者**准备的。
+文档问答、编码助手、日常助手都跑在同一个框架上——变的只是你的 Agent 和
+工具。它不是知识库助手，也没有 planner、critic、多 Agent 编排。
 
 ## 面向对象
 
-- **想读懂并掌控 agent 主循环的开发者**——整个运行时就是几个文件，没有框架
-  黑魔法要对抗。
+- **想读懂并掌控 agent 主循环的开发者**——整个运行时就是几个文件，想改直接改。
 - **想要一个本地、终端化通用助手的人**——既能正常聊天，也能查文件、读文档、
   跑命令、写代码；一个 `.env` 指向任意 OpenAI 兼容端点即可。
 - **想快速搭一个领域小 agent 的人**（文档 FAQ、编码助手、日常助手）——定义
@@ -186,14 +170,28 @@ Agent 是 `core.agent.Agent` 的 Python 子类——不是 YAML 文件。它只�
 
 ```python
 from core.agent import Agent
+from core.tool import agent_tool
+
+
+@agent_tool
+def hello(name: str) -> str:
+    """Say hello to someone."""
+    return f"hello {name}"
 
 
 class MyAgent(Agent):
     name = "my-agent"
-    prompt_path = "prompts/agent.md"
-    tool_include = ["filesystem.*", "shell.run", "python.run"]
-    max_steps = 8
+    prompt = "You are a friendly assistant."
+    own_tools = [hello]   # 只属于这个 Agent 的私有工具
+
+
+agent = MyAgent()
+result = await agent.run("say hello to codex")
+print(result.text)
 ```
+
+`@agent_tool` 定义只属于某个 Agent 的私有工具；共享工具用 `@tool` 写在
+`tools/` 下（见下文）。
 
 内置 Agent（用 `--agent` 选择，默认 `daily`）：
 
