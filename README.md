@@ -321,17 +321,19 @@ section (OS + release/arch, Python version, detected terminal, shell, user,
 and cwd), mirrored on the agent as `agent.environment` and in `ToolContext`,
 so the model and tools can adapt to the platform without probing.
 
-The loop loads prior turns and facts into context at run start (recent turns
-verbatim, older clipped), injects matched experiences as `RELEVANT
-EXPERIENCE`, and saves the run at the end. After a completed run that used
-tools, the model distills the run into one JSON experience (`daily.forget`
-deletes incorrect records; `daily.experiences` lists them). Restart `python
--m chat` with the same `--session` and it remembers the conversation.
+The loop loads prior turns and facts into context at run start — the most
+recent `history_recent_turns` (default 3) verbatim, earlier turns compressed
+to a one-line summary (`CONVERSATION SUMMARY`) — injects matched experiences
+as `RELEVANT EXPERIENCE`, and saves the run at the end. After a completed run
+that used tools, the model distills the run into one JSON experience
+(`daily.forget` deletes incorrect records; `daily.experiences` lists them).
+Restart `python -m chat` with the same `--session` and it remembers the
+conversation.
 
 Recency is explicit: history turns are labeled with their global session
-number and the rendered section ends by marking the latest turn, so the order
-is unambiguous at a glance; `VERIFIED FACTS` is capped at `max_facts` (default
-15) so stale topics cannot crowd out the recent thread.
+number, the recent block ends by marking the latest turn, and `CURRENT USER
+REQUEST` is always the last section; `VERIFIED FACTS` is capped at
+`max_facts` (default 15) so stale topics cannot crowd out the recent thread.
 
 Debug records stay trustworthy: `Turn.seq` is migrated to `AUTOINCREMENT` (so
 cleared sessions never recycle turn numbers), and on startup `Memory` prunes

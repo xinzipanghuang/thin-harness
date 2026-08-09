@@ -147,11 +147,12 @@ class ContextBuilder:
         CURRENT TIME
         ENVIRONMENT              (OS / terminal / shell / cwd)
         SESSION STATE          (from memory, when a prior session exists)
-        CURRENT USER REQUEST
-        CONVERSATION HISTORY      (from memory, clipped)
         VERIFIED FACTS            (initial facts from memory)
         RELEVANT EXPERIENCE       (reusable methodology from memory, when matched)
         AVAILABLE TOOLS
+        CONVERSATION SUMMARY      (earlier turns, one line each)
+        CONVERSATION HISTORY      (most recent turns, verbatim)
+        CURRENT USER REQUEST      (always the last section)
 
     The loop then appends, per model step: an assistant message carrying the
     tool calls, one tool message per result, and a user message whenever new
@@ -184,15 +185,17 @@ class ContextBuilder:
             created, updated = session_times
             if created is not None and updated is not None:
                 sections.append(("SESSION STATE", _session_state(created, updated)))
-        sections.append(("CURRENT USER REQUEST", state.request))
-        if history:
-            sections.append(("CONVERSATION HISTORY", self._render_history(history)))
         if state.facts:
             sections.append(("VERIFIED FACTS", self._render_facts(state)))
         if experiences:
             sections.append(("RELEVANT EXPERIENCE", self._render_experiences(experiences)))
         if self.tool_names:
             sections.append(("AVAILABLE TOOLS", ", ".join(self.tool_names)))
+        if history:
+            sections.extend(self.history_sections(history))
+        # The current request is always the last section: the newest input the
+        # model reads, directly after the conversation it belongs to.
+        sections.append(("CURRENT USER REQUEST", state.request))
         body = "\n\n".join(f"{header}\n{content}" for header, content in sections)
         return [
             Message(role="system", content=self.system_prompt),
@@ -286,32 +289,55 @@ class ContextBuilder:
                 )
         return (total + 3) // 4
 
-    def _render_history(self, history: list[tuple]) -> str:
-        verbatim = max(0, int(self.config.history_verbatim_turns))
-        start = max(0, len(history) - verbatim)
+    def history_sections(self, history: list[tuple]) -> list[tuple[str, str]]:
+        """Split history into (header, body) sections for the context.
+
+        The ``history_recent_turns`` most recent turns are rendered verbatim
+        (``CONVERSATION HISTORY``); everything earlier is compressed to one
+        line per turn (``CONVERSATION SUMMARY``). Turns are labeled with their
+        global session number when available, else with a window index.
+        """
         numbered = bool(history) and len(history[0]) == 3  # (seq, user, assistant)
-        lines: list[str] = []
-        last_seq: Optional[int] = None
-        for index, item in enumerate(history, 1):
-            if numbered:
-                seq, user_text, assistant_text = item
-                label = seq
-                last_seq = seq
-            else:
-                user_text, assistant_text = item
-                label = index
-            if index - 1 >= start:
+        recent_count = max(0, int(self.config.history_recent_turns))
+        split_at = max(0, len(history) - recent_count) if recent_count else len(history)
+        older = history[:split_at]
+        recent = history[split_at:]
+        sections: list[tuple[str, str]] = []
+
+        if older:
+            lines: list[str] = []
+            for index, item in enumerate(older, 1):
+                if numbered:
+                    seq, user_text, assistant_text = item
+                    label = seq
+                else:
+                    user_text, assistant_text = item
+                    label = index
+                lines.append(f"[turn {label}] user: {self._clip(user_text, 60)}")
+                lines.append(f"    → {self._clip(assistant_text, 80)}")
+            sections.append(("CONVERSATION SUMMARY", "\n".join(lines)))
+
+        if recent:
+            lines = []
+            last_label: Optional[int] = None
+            for index, item in enumerate(recent, 1):
+                if numbered:
+                    seq, user_text, assistant_text = item
+                    label = seq
+                else:
+                    user_text, assistant_text = item
+                    label = split_at + index
+                last_label = label
                 lines.append(f"[turn {label}] user: {self._verbatim(user_text)}")
                 lines.append(f"[turn {label}] assistant: {self._verbatim(assistant_text)}")
-            else:
-                lines.append(f"[turn {label}] user: {self._clip(user_text)}")
-                lines.append(f"[turn {label}] assistant: {self._clip(assistant_text)}")
-        if numbered and last_seq is not None:
-            lines.append(
-                f"[history note: these are the last {len(history)} turn(s) of this "
-                f"session; the latest is [turn {last_seq}]]"
-            )
-        return "\n".join(lines)
+            if numbered and last_label is not None:
+                lines.append(
+                    f"[history note: the last {len(recent)} turn(s) of this session "
+                    f"are shown above; earlier turns are summarized; the latest is "
+                    f"[turn {last_label}]]"
+                )
+            sections.append(("CONVERSATION HISTORY", "\n".join(lines)))
+        return sections
 
     @staticmethod
     def _render_experiences(experiences: list[dict]) -> str:

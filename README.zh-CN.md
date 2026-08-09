@@ -305,15 +305,16 @@ Agent 自身也持有时间状态：每个 `Agent` 实例暴露 `started_at`、
 `agent.environment` 和 `ToolContext` 上，模型和工具无需自行探测就能适配
 当前平台。
 
-循环在运行开始时把先前的 Turn 和 Fact 加载进上下文（最近轮次全文、更早的
-裁剪），把命中的经验注入为 `RELEVANT EXPERIENCE`，结束时保存本次运行。
-完成且调用过工具的运行结束后，模型会把本次运行提炼成一条 JSON 经验
-（`daily.forget` 删除错误经验，`daily.experiences` 查看经验库）。用相同
-`--session` 重启 `python -m chat` 即可记住对话。
+循环在运行开始时把先前的 Turn 和 Fact 加载进上下文——最近的
+`history_recent_turns`（默认 3）轮全文展示，更早的轮次压成一行摘要
+（`CONVERSATION SUMMARY`）——把命中的经验注入为 `RELEVANT EXPERIENCE`，
+结束时保存本次运行。完成且调用过工具的运行结束后，模型会把本次运行提炼
+成一条 JSON 经验（`daily.forget` 删除错误经验，`daily.experiences` 查看
+经验库）。用相同 `--session` 重启 `python -m chat` 即可记住对话。
 
 “最近”是显式的：历史轮次用会话内全局编号标注，渲染末尾会点明最新一轮，
-顺序一眼可辨；`VERIFIED FACTS` 只注入最近 `max_facts`（默认 15）条，避免
-陈旧话题淹没当前话题。
+`CURRENT USER REQUEST` 永远放在最后一段；`VERIFIED FACTS` 只注入最近
+`max_facts`（默认 15）条，避免陈旧话题淹没当前话题。
 
 调试记录保持可信：`Turn.seq` 迁移为 `AUTOINCREMENT`（清空会话后不再复用
 轮次号），启动时 `Memory` 自动清理指向已删除 turn 或时间戳不可能的事件；

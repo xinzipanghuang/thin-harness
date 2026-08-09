@@ -83,7 +83,10 @@ async def run_agent(
             if history is None:
                 history = memory.load_history(
                     session_id,
-                    limit=agent.context.history_max_turns,
+                    limit=(
+                        agent.context.history_recent_turns
+                        + agent.context.history_summary_turns
+                    ),
                     numbered=True,
                 )
             for fact in memory.load_facts(session_id, limit=agent.context.max_facts):
@@ -671,7 +674,8 @@ async def _final_generation(
     sections = [f"CURRENT TIME\n{now_line}", f"CURRENT USER REQUEST\n{request}"]
     if history:
         builder = ContextBuilder(agent.system_prompt, agent.context)
-        sections.append("CONVERSATION HISTORY\n" + builder._render_history(history))
+        for header, body in builder.history_sections(history):
+            sections.append(f"{header}\n{body}")
     if state.facts:
         sections.append(
             "VERIFIED FACTS\n"
