@@ -274,12 +274,42 @@ Codex 风格记忆在 `core/storage.py`（默认 `data/agent.db`）：
 - `Turn` —— 每次运行（请求、响应、停止原因、计数器）；
 - `Fact` —— 经验证的事实，会话级或全局（`Memory.remember`）；
 - `Artifact` —— 完整工具输出，运行结束后仍保留；
+- `Experience` —— “进化”记忆：每条经验是一个 JSON 文档
+  （`problem_type`、`keywords`、`method`、`result`、`success`），按规范化
+  请求或“相同问题类型 + ≥2 个共享关键词”去重更新，按使用次数排序，启动时
+  自动合并存量重复，并带时间维度：`learned_at` / `last_used_at` /
+  `time_sensitive`，时效敏感的经验超过 `experience_stale_days`（默认 7 天）
+  未再使用就不再注入，直到重新验证；
 - `DebugEvent` —— 每次运行的结构化调试记录，与 UI 调试级别无关始终落库
   （用 `Memory.load_debug(run_id)` 查看）。
 
+经验模块按 Agent 单独配置：在 `Agent` 子类上设 `experience_enabled = False`
+即可同时关闭“注入经验”和“运行后沉淀”（例如 `FAQAgent` 已关闭，文档问答
+不需要历史捷径）。
+
+经验支持原地更新：同一任务换个说法再问，会合并进原记录而不是新建；
+`daily.update` 可直接在聊天里编辑某条经验（改方法、换关键词、标记为失败），
+`daily.forget` 负责删除。
+
+每次运行都带时间：上下文头部固定注入 `CURRENT TIME`（本地时钟 + 时区），
+反思沉淀时也会让模型标注该方法是否时效敏感——agent 不用调工具就知道“今天”，
+过期的天气/新闻类旧方法会自动沉底，直到被重新验证。
+
+Agent 自身也持有时间状态：每个 `Agent` 实例暴露 `started_at`、
+`last_run_at` 和 `now()` 供钩子/工具使用；当会话已存在时，上下文头部还会
+显示 `SESSION STATE`（会话开始时间、上次活跃时间，以及人性化的“X 前”），
+跨天恢复对话时 agent 不会再搞不清自己的时间线。
+
+环境感知：上下文头部还有 `ENVIRONMENT` 段（操作系统 + 版本/架构、Python
+版本、检测到的终端、shell、用户、工作目录），同时挂在
+`agent.environment` 和 `ToolContext` 上，模型和工具无需自行探测就能适配
+当前平台。
+
 循环在运行开始时把先前的 Turn 和 Fact 加载进上下文（最近轮次全文、更早的
-裁剪），结束时保存本次运行。用相同 `--session` 重启 `python -m chat` 即可
-记住对话。
+裁剪），把命中的经验注入为 `RELEVANT EXPERIENCE`，结束时保存本次运行。
+完成且调用过工具的运行结束后，模型会把本次运行提炼成一条 JSON 经验
+（`daily.forget` 删除错误经验，`daily.experiences` 查看经验库）。用相同
+`--session` 重启 `python -m chat` 即可记住对话。
 
 ## 添加一个工具
 

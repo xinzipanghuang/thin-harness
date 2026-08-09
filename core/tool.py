@@ -34,6 +34,9 @@ class ToolContext:
     request: str = ""
     facts: list[Fact] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)  # per-run tool scratchpad
+    memory: Optional[Any] = None  # Memory instance, when the run is memory-backed
+    session_id: str = ""  # current chat session id, when memory-backed
+    environment: dict[str, Any] = field(default_factory=dict)  # OS/terminal/shell/cwd
     _current_tool: str = ""
 
     def record_fact(self, value: Any, source: Optional[str] = None) -> Fact:

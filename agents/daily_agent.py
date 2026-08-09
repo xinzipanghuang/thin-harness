@@ -12,9 +12,10 @@ class DailyAgent(Agent):
 
     Covers repo/filesystem work (``filesystem.*``), shell and python
     execution, document reading (``documents.*``), artifact inspection
-    (``artifacts.read``), and small daily helpers (``daily.*``). Destructive
-    ``filesystem.delete`` is excluded. The model comes from .env
-    (LLM_API_KEY / LLM_BASE_URL / LLM_MODEL / LLM_ENABLE_THINKING).
+    (``artifacts.read``), web search (``web.*``), and small daily helpers
+    (``daily.*``). Destructive ``filesystem.delete`` is excluded. The model
+    comes from .env (LLM_API_KEY / LLM_BASE_URL / LLM_MODEL /
+    LLM_ENABLE_THINKING).
     """
 
     name = "daily-agent"
@@ -25,6 +26,7 @@ class DailyAgent(Agent):
         "python.run",
         "documents.*",
         "artifacts.read",
+        "web.*",
         "daily.*",
     ]
     tool_exclude = ["filesystem.delete"]
@@ -45,6 +47,10 @@ class DailyAgent(Agent):
         turn. Without them, a follow-up question ("this question", "文档里")
         has no idea where the source file is and answers from general
         knowledge instead of the document.
+
+        Methodology-only: we record *what* was read/searched (the method), not
+        the content/results themselves. For web.search we record the tool,
+        keyword and channel used, but never the returned titles/links/snippets.
         """
         if not result.ok:
             return
@@ -85,3 +91,21 @@ class DailyAgent(Agent):
                     f"Searched {path} for {pattern!r}: {len(matches)} match(es) found",
                     source=str(path),
                 )
+        elif call.name == "web.search":
+            query = str(args.get("query") or "")
+            channel = str(args.get("channel") or "general")
+            max_results = args.get("max_results") or 10
+            if not query:
+                return
+            tracker = ctx.state.setdefault("web_search_fact_keys", set())
+            key = f"{channel}\x00{query}\x00{max_results}"
+            if key in tracker:
+                return
+            tracker.add(key)
+            # Methodology only: record the tool + keyword + channel used, never
+            # the returned titles/links/snippets (those are results, not method).
+            ctx.record_fact(
+                f"Web-searched via web.search (channel={channel}, max_results={max_results}) "
+                f"for query: {query!r}",
+                source="web.search",
+            )

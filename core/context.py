@@ -11,9 +11,131 @@ incremental messages.
 from __future__ import annotations
 
 import json
+import os
+import platform
+import sys
+from datetime import datetime, timezone
 from typing import Optional
 
 from .types import ContextConfig, Fact, Message, Observation, RunState, ToolCall
+
+
+def _current_time_line() -> str:
+    """Local wall-clock time + timezone, injected so the model is time-aware."""
+    now = datetime.now().astimezone()
+    return f"{now.strftime('%Y-%m-%d %H:%M:%S')} {now.tzname()}"
+
+
+def environment_info() -> dict[str, str]:
+    """Detect OS / Python / terminal / shell / user / cwd for the agent."""
+    system = platform.system()
+    return {
+        "os": system,
+        "os_release": (
+            platform.version() if system == "Windows" else platform.release()
+        ),
+        "arch": platform.machine(),
+        "python": sys.version.split()[0],
+        "terminal": _detect_terminal(),
+        "shell": _detect_shell(),
+        "user": (
+            os.environ.get("USER")
+            or os.environ.get("USERNAME")
+            or os.environ.get("LOGNAME")
+            or ""
+        ),
+        "cwd": os.getcwd(),
+    }
+
+
+def _detect_terminal() -> str:
+    """Best-effort terminal emulator name from the environment."""
+    env = os.environ
+    program = (env.get("TERM_PROGRAM") or "").strip()
+    if program:
+        if program.lower() == "vscode":
+            return "VS Code terminal"
+        if program == "Apple_Terminal":
+            return "Apple Terminal"
+        if program == "iTerm.app":
+            return "iTerm2"
+        if program == "Windows Terminal":
+            return "Windows Terminal"
+        return program
+    if env.get("WT_SESSION"):
+        return "Windows Terminal"
+    term = (env.get("TERM") or "").strip()
+    if not term:
+        return "unknown"
+    if env.get("SSH_TTY") or env.get("SSH_CONNECTION"):
+        return f"ssh ({term})"
+    if env.get("TMUX"):
+        return f"tmux ({term})"
+    if term.startswith("screen"):
+        return f"screen ({term})"
+    return term
+
+
+def _detect_shell() -> str:
+    env = os.environ
+    shell = (env.get("SHELL") or "").strip()
+    if shell:
+        return os.path.basename(shell)
+    if env.get("PSModulePath"):
+        return "powershell"
+    comspec = (env.get("COMSPEC") or "").strip()
+    if comspec:
+        return os.path.basename(comspec)
+    return "unknown"
+
+
+def _environment_section() -> str:
+    info = environment_info()
+    os_display = {"Windows": "Windows", "Linux": "Linux", "Darwin": "macOS"}.get(
+        info["os"], info["os"]
+    )
+    if info["os_release"]:
+        os_display += f" {info['os_release']}"
+    if info["arch"]:
+        os_display += f" ({info['arch']})"
+    lines = [
+        f"os: {os_display}",
+        f"python: {info['python']}",
+        f"terminal: {info['terminal']}",
+        f"shell: {info['shell']}",
+    ]
+    if info["user"]:
+        lines.append(f"user: {info['user']}")
+    lines.append(f"cwd: {info['cwd']}")
+    return "\n".join(lines)
+
+
+def _ago(stored: datetime, now: datetime) -> str:
+    """Human '3 minutes ago' between a stored (UTC) time and local now."""
+    if stored.tzinfo is None:
+        stored = stored.replace(tzinfo=timezone.utc).astimezone(now.tzinfo)
+    seconds = max(0, int((now - stored).total_seconds()))
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60} minute(s) ago"
+    if seconds < 86400:
+        return f"{seconds // 3600} hour(s) ago"
+    return f"{seconds // 86400} day(s) ago"
+
+
+def _session_state(created: datetime, updated: datetime) -> str:
+    """Orient the agent inside its own conversation timeline."""
+    now = datetime.now().astimezone()
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc).astimezone(now.tzinfo)
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc).astimezone(now.tzinfo)
+    fmt = "%Y-%m-%d %H:%M:%S"
+    return (
+        f"started: {created.strftime(fmt)} ({_ago(created, now)})"
+        f"\nlast activity: {updated.strftime(fmt)} ({_ago(updated, now)})"
+    )
 
 
 class ContextBuilder:
@@ -22,9 +144,13 @@ class ContextBuilder:
     Layout of the base messages::
 
         SYSTEM PROMPT
+        CURRENT TIME
+        ENVIRONMENT              (OS / terminal / shell / cwd)
+        SESSION STATE          (from memory, when a prior session exists)
         CURRENT USER REQUEST
         CONVERSATION HISTORY      (from memory, clipped)
         VERIFIED FACTS            (initial facts from memory)
+        RELEVANT EXPERIENCE       (reusable methodology from memory, when matched)
         AVAILABLE TOOLS
 
     The loop then appends, per model step: an assistant message carrying the
@@ -47,12 +173,24 @@ class ContextBuilder:
         self,
         state: RunState,
         history: Optional[list[tuple[str, str]]] = None,
+        experiences: Optional[list[dict]] = None,
+        session_times: Optional[tuple] = None,
     ) -> list[Message]:
-        sections = [("CURRENT USER REQUEST", state.request)]
+        sections = [
+            ("CURRENT TIME", _current_time_line()),
+            ("ENVIRONMENT", _environment_section()),
+        ]
+        if session_times is not None:
+            created, updated = session_times
+            if created is not None and updated is not None:
+                sections.append(("SESSION STATE", _session_state(created, updated)))
+        sections.append(("CURRENT USER REQUEST", state.request))
         if history:
             sections.append(("CONVERSATION HISTORY", self._render_history(history)))
         if state.facts:
             sections.append(("VERIFIED FACTS", self._render_facts(state)))
+        if experiences:
+            sections.append(("RELEVANT EXPERIENCE", self._render_experiences(experiences)))
         if self.tool_names:
             sections.append(("AVAILABLE TOOLS", ", ".join(self.tool_names)))
         body = "\n\n".join(f"{header}\n{content}" for header, content in sections)
@@ -159,6 +297,40 @@ class ContextBuilder:
             else:
                 lines.append(f"[turn {index}] user: {self._clip(user_text)}")
                 lines.append(f"[turn {index}] assistant: {self._clip(assistant_text)}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _render_experiences(experiences: list[dict]) -> str:
+        """Render stored experiences as reusable methodology (not facts)."""
+        lines: list[str] = [
+            "NOTE: historical methods from past runs, for reference only. If they "
+            "do not fit the current request or environment, explore a new path "
+            "instead of blindly following them."
+        ]
+        for exp in experiences:
+            exp_id = exp.get("id") or "?"
+            label = exp.get("problem_type") or exp.get("request") or "task"
+            lines.append(f"[E{exp_id}] {label}")
+            keywords = exp.get("keywords") or []
+            if keywords:
+                lines.append(f"    keywords: {', '.join(str(k) for k in keywords[:6])}")
+            method = str(exp.get("method") or "").strip()
+            if method:
+                lines.append(f"    method: {method}")
+            result = str(exp.get("result") or "").strip()
+            if result:
+                lines.append(f"    result: {result}")
+            success = bool(exp.get("success", True))
+            uses = int(exp.get("uses") or 1)
+            meta = f"success: {success} | used {uses} time(s)"
+            age = exp.get("age_days")
+            if age is not None:
+                meta += f" | last used {int(age)}d ago"
+            if exp.get("time_sensitive"):
+                meta += " | time-sensitive: verify live"
+            if exp.get("stale"):
+                meta += " | STALE"
+            lines.append(f"    {meta}")
         return "\n".join(lines)
 
     @staticmethod

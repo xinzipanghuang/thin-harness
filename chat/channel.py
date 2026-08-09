@@ -28,11 +28,15 @@ Commands:
   /exit     leave the chat
   Ctrl+C    exit (same as /quit)
   Shift+Enter  insert a newline in a message
+  ← →          move the cursor, ↑ ↓ browse input history
+  Home/End      jump to start/end of the line, Delete removes forward
 
 Type a message and press Enter to talk to the agent.
 """
 
 _INPUT_PROMPT = "[bold cyan]you[/bold cyan] > "
+_RAW_PROMPT = "you > "
+_FALLBACK_NOTICE_SHOWN = False
 
 
 def _display_width(ch: str) -> int:
@@ -42,28 +46,82 @@ def _display_width(ch: str) -> int:
     return 1
 
 
-def _read_line_blocking(console: Console) -> str:
+def _redraw_input(prompt: str, chars: list[str], cursor: int, row: int, col: int) -> tuple[int, int]:
+    """Rewrite the current input block in place and reposition the cursor.
+
+    Returns the new terminal cursor ``(row, col)`` (row offset within the
+    input block, column offset from the prompt start) so the caller can keep
+    tracking where the terminal cursor actually is between redraws.
+    """
+    text = "".join(chars)
+    prefix = text[:cursor]
+    cursor_line = prefix.count("\n")
+    prefix_cols = sum(_display_width(ch) for ch in prefix.rsplit("\n", 1)[-1])
+    lines_below = text.count("\n") - cursor_line
+    out = ""
+    if row > 0:
+        out += f"\x1b[{row}F"  # back up to the first row of the input block
+    out += "\r" + prompt + text + "\x1b[J"  # rewrite and clear stale tail
+    if lines_below:
+        out += f"\x1b[{lines_below}A"  # down to the row the cursor belongs on
+    out += f"\x1b[{len(prompt) + prefix_cols + 1}G"  # then the exact column
+    sys.stdout.write(out)
+    sys.stdout.flush()
+    return cursor_line, len(prompt) + prefix_cols
+
+
+def _notify_fallback(reason: str, hint: str) -> None:
+    """Print (once) why the primary console reader fell back to another one."""
+    global _FALLBACK_NOTICE_SHOWN
+    if _FALLBACK_NOTICE_SHOWN:
+        return
+    _FALLBACK_NOTICE_SHOWN = True
+    sys.stdout.write(f"\rnote: {reason}; {hint}\n")
+    sys.stdout.flush()
+
+
+def _read_line_blocking(console: Console, history: Optional[list[str]] = None) -> str:
     """Read one message, blocking.
 
     On Windows, raw console input is used so Enter submits and Shift+Enter
-    inserts a newline (multi-line messages). Falls back to plain single-line
-    ``input()`` on other platforms or if the console API is unavailable.
+    inserts a newline (multi-line messages). If the console API is
+    unavailable, a ``msvcrt``-based editor with the same keys is used; if that
+    fails too, plain single-line ``input()`` (no editing) with a visible note.
+    On other platforms plain ``input()`` is used directly.
     """
     if sys.platform == "win32":
+        win32_error: Optional[BaseException] = None
         try:
-            return _read_win32_console(console)
-        except Exception:
-            pass
+            return _read_win32_console(console, history)
+        except Exception as exc:
+            win32_error = exc
+        try:
+            line = _read_msvcrt_console(history)
+        except Exception as exc:
+            _notify_fallback(
+                "interactive console input unavailable "
+                f"(ReadConsoleInputW: {type(win32_error).__name__}, "
+                f"msvcrt: {type(exc).__name__})",
+                "using plain input (arrow keys and Shift+Enter off)",
+            )
+        else:
+            _notify_fallback(
+                f"console input API unavailable ({type(win32_error).__name__})",
+                "using fallback editor (arrows/history/Shift+Enter still work)",
+            )
+            return line
     return console.input(_INPUT_PROMPT)
 
 
-def _read_win32_console(console: Console) -> str:
+def _read_win32_console(console: Console, history: Optional[list[str]] = None) -> str:
     """Windows console line input via ReadConsoleInputW.
 
     Enter (no shift) submits the message; Shift+Enter appends a newline so the
-    message can span several lines. Backspace is width-aware (CJK wide
-    characters are erased across both columns) and can cross inserted
-    newlines; Ctrl+C raises KeyboardInterrupt (same as /quit).
+    message can span several lines. Arrow keys move the cursor (Left/Right),
+    Home/End jump to start/end, Delete removes forward, Up/Down browse the
+    session's input history, and Backspace is width-aware (CJK wide characters
+    are erased across both columns). Ctrl+C raises KeyboardInterrupt (same as
+    /quit).
     """
     import ctypes
     from ctypes import wintypes
@@ -71,8 +129,15 @@ def _read_win32_console(console: Console) -> str:
     kernel32 = ctypes.windll.kernel32
     STD_INPUT_HANDLE = -10
     KEY_EVENT = 0x0001
-    VK_RETURN = 0x0D
     VK_BACK = 0x08
+    VK_RETURN = 0x0D
+    VK_END = 0x23
+    VK_HOME = 0x24
+    VK_LEFT = 0x25
+    VK_UP = 0x26
+    VK_RIGHT = 0x27
+    VK_DOWN = 0x28
+    VK_DELETE = 0x2E
     SHIFT_PRESSED = 0x0010
     ENABLE_LINE_INPUT = 0x0002
     ENABLE_ECHO_INPUT = 0x0004
@@ -98,9 +163,20 @@ def _read_win32_console(console: Console) -> str:
         kernel32.SetConsoleMode(
             handle, mode.value & ~ENABLE_LINE_INPUT & ~ENABLE_ECHO_INPUT
         )
-        console.print(_INPUT_PROMPT, end="")
+        sys.stdout.write(_RAW_PROMPT)
         sys.stdout.flush()
-        buffer: list[str] = []
+        chars: list[str] = []
+        cursor = 0
+        row = 0
+        col = len(_RAW_PROMPT)
+        hist = list(history or [])
+        history_index = len(hist)
+        draft: Optional[list[str]] = None
+
+        def redraw() -> None:
+            nonlocal row, col
+            row, col = _redraw_input(_RAW_PROMPT, chars, cursor, row, col)
+
         record = InputRecord()
         read_count = wintypes.DWORD()
         while True:
@@ -113,33 +189,184 @@ def _read_win32_console(console: Console) -> str:
             key = record.key_event
             if not key.b_key_down:
                 continue
-            if key.virtual_key_code == VK_RETURN:
+            code = key.virtual_key_code
+            if code == VK_RETURN:
                 if key.control_key_state & SHIFT_PRESSED:
-                    buffer.append("\n")
-                    sys.stdout.write("\n")
+                    chars.insert(cursor, "\n")
+                    cursor += 1
+                    redraw()
                 else:
                     sys.stdout.write("\n")
                     sys.stdout.flush()
                     break
-            elif key.virtual_key_code == VK_BACK:
-                if buffer:
-                    removed = buffer.pop()
-                    if removed == "\n":
-                        sys.stdout.write("\x1b[1A\x1b[2K")
+            elif code == VK_BACK:
+                if cursor > 0:
+                    chars.pop(cursor - 1)
+                    cursor -= 1
+                    redraw()
+            elif code == VK_DELETE:
+                if cursor < len(chars):
+                    chars.pop(cursor)
+                    redraw()
+            elif code == VK_LEFT:
+                if cursor > 0:
+                    cursor -= 1
+                    redraw()
+            elif code == VK_RIGHT:
+                if cursor < len(chars):
+                    cursor += 1
+                    redraw()
+            elif code == VK_HOME:
+                if cursor != 0:
+                    cursor = 0
+                    redraw()
+            elif code == VK_END:
+                if cursor != len(chars):
+                    cursor = len(chars)
+                    redraw()
+            elif code == VK_UP:
+                if hist and history_index > 0:
+                    if draft is None:
+                        draft = list(chars)
+                    history_index -= 1
+                    chars = list(hist[history_index])
+                    cursor = len(chars)
+                    redraw()
+            elif code == VK_DOWN:
+                if hist and history_index < len(hist):
+                    history_index += 1
+                    if history_index == len(hist):
+                        chars = list(draft) if draft is not None else []
+                        draft = None
                     else:
-                        width = _display_width(removed)
-                        sys.stdout.write("\b" * width + " " * width + "\b" * width)
-                    sys.stdout.flush()
+                        chars = list(hist[history_index])
+                    cursor = len(chars)
+                    redraw()
             elif key.unicode_char and key.unicode_char != "\x00":
                 ch = key.unicode_char
                 if ch == "\x03":  # Ctrl+C: behave like /quit
                     raise KeyboardInterrupt
-                buffer.append(ch)
-                sys.stdout.write(ch)
-                sys.stdout.flush()
-        return "".join(buffer)
+                chars.insert(cursor, ch)
+                cursor += 1
+                redraw()
+        return "".join(chars)
     finally:
         kernel32.SetConsoleMode(handle, mode.value)
+
+
+def _read_msvcrt_console(history: Optional[list[str]] = None) -> str:
+    """Windows fallback line editor via ``msvcrt`` (real console or ConPTY).
+
+    Offers the same editing model as ``_read_win32_console`` (arrow keys,
+    Home/End, Delete, Up/Down history, CJK-aware Backspace). ``msvcrt`` does
+    not expose key modifiers, so Shift+Enter is detected via
+    ``GetKeyState(VK_SHIFT)`` at the moment Enter is pressed.
+    """
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    user32 = ctypes.windll.user32
+    STD_INPUT_HANDLE = -10
+    VK_SHIFT = 0x10
+    ENABLE_LINE_INPUT = 0x0002
+    ENABLE_ECHO_INPUT = 0x0004
+
+    handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+    mode = wintypes.DWORD()
+    if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+        raise OSError("GetConsoleMode failed")
+    try:
+        kernel32.SetConsoleMode(
+            handle, mode.value & ~ENABLE_LINE_INPUT & ~ENABLE_ECHO_INPUT
+        )
+        sys.stdout.write(_RAW_PROMPT)
+        sys.stdout.flush()
+        chars: list[str] = []
+        cursor = 0
+        row = 0
+        col = len(_RAW_PROMPT)
+        hist = list(history or [])
+        history_index = len(hist)
+        draft: Optional[list[str]] = None
+        extended = {"H": "up", "P": "down", "K": "left", "M": "right",
+                    "G": "home", "O": "end", "S": "delete"}
+
+        def redraw() -> None:
+            nonlocal row, col
+            row, col = _redraw_input(_RAW_PROMPT, chars, cursor, row, col)
+
+        while True:
+            ch = msvcrt.getwch()
+            if ch in ("\x00", "\xe0"):  # extended key: scan code follows
+                action = extended.get(msvcrt.getwch())
+                if action == "up":
+                    if hist and history_index > 0:
+                        if draft is None:
+                            draft = list(chars)
+                        history_index -= 1
+                        chars = list(hist[history_index])
+                        cursor = len(chars)
+                        redraw()
+                elif action == "down":
+                    if hist and history_index < len(hist):
+                        history_index += 1
+                        if history_index == len(hist):
+                            chars = list(draft) if draft is not None else []
+                            draft = None
+                        else:
+                            chars = list(hist[history_index])
+                        cursor = len(chars)
+                        redraw()
+                elif action == "left":
+                    if cursor > 0:
+                        cursor -= 1
+                        redraw()
+                elif action == "right":
+                    if cursor < len(chars):
+                        cursor += 1
+                        redraw()
+                elif action == "home":
+                    if cursor != 0:
+                        cursor = 0
+                        redraw()
+                elif action == "end":
+                    if cursor != len(chars):
+                        cursor = len(chars)
+                        redraw()
+                elif action == "delete":
+                    if cursor < len(chars):
+                        chars.pop(cursor)
+                        redraw()
+                continue
+            if ch == "\r":
+                shifted = bool(user32.GetKeyState(VK_SHIFT) & 0x8000)
+                if shifted:
+                    chars.insert(cursor, "\n")
+                    cursor += 1
+                    redraw()
+                else:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    break
+            elif ch == "\x08":
+                if cursor > 0:
+                    chars.pop(cursor - 1)
+                    cursor -= 1
+                    redraw()
+            elif ch == "\x03":
+                raise KeyboardInterrupt
+            elif ch == "\x1b":
+                continue  # Escape: ignored
+            else:
+                chars.insert(cursor, ch)
+                cursor += 1
+                redraw()
+        return "".join(chars)
+    finally:
+        kernel32.SetConsoleMode(handle, mode.value)
+
 
 class TerminalChannel:
     def __init__(
@@ -176,6 +403,7 @@ class TerminalChannel:
         self._timing: dict[str, dict[str, float]] = {}
         self._timers: dict[str, dict] = {}
         self._last_elapsed_s: Optional[float] = None
+        self._history: list[str] = []
 
     async def start(self) -> None:
         self.bus.subscribe_outbound(self._on_outbound)
@@ -250,6 +478,9 @@ class TerminalChannel:
             text = raw.strip()
             if not text:
                 continue
+            self._history.append(" ".join(raw.split()))
+            if len(self._history) > 100:
+                self._history = self._history[-100:]
             if text in ("/exit", "/quit"):
                 break
             if text == "/help":
@@ -311,7 +542,7 @@ class TerminalChannel:
 
         def _read() -> None:
             try:
-                line = _read_line_blocking(self.console)
+                line = _read_line_blocking(self.console, self._history)
             except BaseException as exc:  # EOFError / KeyboardInterrupt in the thread
                 _deliver(_set_exception, exc)
             else:

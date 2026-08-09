@@ -286,12 +286,47 @@ Codex-style memory in `core/storage.py` (default `data/agent.db`):
 - `Turn` — every run (request, response, stop reason, counters);
 - `Fact` — verified facts, session-scoped or global (`Memory.remember`);
 - `Artifact` — full tool outputs, survive the run;
+- `Experience` — "evolution" memory: one JSON document per reusable
+  methodology (`problem_type`, `keywords`, `method`, `result`, `success`),
+  upserted per normalized request or same problem type with ≥2 shared
+  keywords, ranked by usage, deduplicated on startup, and time-aware:
+  each record carries `learned_at` / `last_used_at` / `time_sensitive`, and
+  time-sensitive records older than `experience_stale_days` (default 7) are
+  not injected until re-verified;
 - `DebugEvent` — structured per-run debug records, persisted regardless of
   UI debug level (inspect with `Memory.load_debug(run_id)`).
 
+The experience module is per-agent configurable: set `experience_enabled =
+False` on an `Agent` subclass (e.g. `FAQAgent` does this) to disable both
+injection into context and recording after runs.
+
+Experiences update in place: re-asking the same task (even reworded) merges
+into the existing record instead of creating a duplicate; `daily.update`
+edits a record directly from chat (fix a method, replace keywords, or mark it
+failed) and `daily.forget` deletes one.
+
+Time is part of every run: the context header always includes `CURRENT TIME`
+(local clock + timezone), and the reflection pass records whether a method is
+time-sensitive — so the agent knows "today" without calling a tool and stops
+trusting stale weather/news methods until they are re-verified.
+
+The agent itself carries time state: each `Agent` instance exposes
+`started_at`, `last_run_at` and `now()` for hooks/tools, and when a session
+already exists the context header also shows `SESSION STATE` (when the
+conversation started and its last activity, with human-readable "X ago") — so
+resuming a multi-day conversation never confuses the agent about its timeline.
+
+Environment awareness: the context header also includes an `ENVIRONMENT`
+section (OS + release/arch, Python version, detected terminal, shell, user,
+and cwd), mirrored on the agent as `agent.environment` and in `ToolContext`,
+so the model and tools can adapt to the platform without probing.
+
 The loop loads prior turns and facts into context at run start (recent turns
-verbatim, older clipped) and saves the run at the end. Restart `python -m
-chat` with the same `--session` and it remembers the conversation.
+verbatim, older clipped), injects matched experiences as `RELEVANT
+EXPERIENCE`, and saves the run at the end. After a completed run that used
+tools, the model distills the run into one JSON experience (`daily.forget`
+deletes incorrect records; `daily.experiences` lists them). Restart `python
+-m chat` with the same `--session` and it remembers the conversation.
 
 ## Adding a tool
 

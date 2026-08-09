@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
@@ -55,17 +56,30 @@ async def run_agent(
     log = RunLog(run_id=run_id, agent=agent.name)
     log.record("run_start", request=request, tools=[t.name for t in agent.tools])
     run_started = time.perf_counter()
+    agent.last_run_at = datetime.now().astimezone()
 
     store = ArtifactStore()
-    ctx = ToolContext(artifact_store=store, workdir=agent.runtime.workdir, request=request)
+    ctx = ToolContext(
+        artifact_store=store,
+        workdir=agent.runtime.workdir,
+        request=request,
+        memory=memory,
+        session_id=session_id,
+        environment=agent.environment,
+    )
     state = RunState(request=request)
     ctx.facts = state.facts
     fact_cursor = 0
+    persisted_fact_cursor = 0
     debug_events: list[DebugEvent] = []
 
-    # Codex-style memory: load prior turns and verified facts into context.
+    # Codex-style memory: load prior turns, verified facts and reusable
+    # experiences ("evolution") into context.
+    experiences: list[dict] = []
+    session_times: Optional[tuple] = None
     if memory is not None and session_id:
         try:
+            session_times = memory.session_times(session_id)
             if history is None:
                 history = memory.load_history(
                     session_id, limit=agent.context.history_max_turns
@@ -80,6 +94,16 @@ async def run_agent(
                     )
                 )
             fact_cursor = len(state.facts)
+            persisted_fact_cursor = len(state.facts)
+            if agent.runtime.experience_enabled:
+                # Keep injected experiences to a couple of clearly-relevant
+                # hints; too many would bias the model toward old paths over
+                # exploring.
+                experiences = memory.search_experiences(
+                    request,
+                    limit=2,
+                    stale_after_days=agent.context.experience_stale_days,
+                )
         except Exception as exc:
             log.record("memory_error", error=f"{type(exc).__name__}: {exc}")
 
@@ -121,7 +145,12 @@ async def run_agent(
     )
     # Append-only message history (Codex-style): the base is built once and
     # every change is appended as new messages, keeping the prefix byte-stable.
-    messages = builder.build_initial(state, history=history)
+    messages = builder.build_initial(
+        state,
+        history=history,
+        experiences=experiences,
+        session_times=session_times,
+    )
 
     if agent.bootstrap is not None:
         try:
@@ -280,6 +309,15 @@ async def run_agent(
                     + (len(state.facts) - facts_before)
                 )
                 no_gain = no_gain + 1 if gain == 0 else 0
+                if no_gain == 1:
+                    messages.append(
+                        builder.notice_message(
+                            "No new evidence in the last tool round. If you are "
+                            "reusing a historical experience, check whether it "
+                            "still applies; consider exploring an alternative "
+                            "tool or path."
+                        )
+                    )
                 if budget_exhausted:
                     stop_reason = "max_tool_calls"
                     break
@@ -322,11 +360,30 @@ async def run_agent(
                 steps=state.steps,
                 tool_calls=state.tool_calls,
                 failures=state.failures,
-                facts=state.facts[fact_cursor:],
+                facts=state.facts[persisted_fact_cursor:],
                 artifacts=state.artifacts,
                 artifact_store=store,
                 debug_events=debug_events,
             )
+            # Evolution: distill this run into one reusable experience and
+            # store it as JSON (methodology, not results).
+            if (
+                agent.runtime.experience_enabled
+                and state.tool_calls > 0
+                and stop_reason not in ("error", "timeout")
+            ):
+                experience = await _reflect_experience(
+                    agent, state, request, stop_reason, log, debug
+                )
+                if experience:
+                    exp_id = memory.save_experience(
+                        experience, session_id=session_id, turn_id=run_id
+                    )
+                    log.record(
+                        "experience_recorded",
+                        id=exp_id,
+                        problem_type=experience.get("problem_type", ""),
+                    )
         except Exception as exc:
             log.record("memory_error", error=f"{type(exc).__name__}: {exc}")
     log.record("run_end", stop_reason=stop_reason, text=state.final_text or "")
@@ -608,7 +665,8 @@ async def _final_generation(
     a knowledge-base assistant). Returns "" if it fails, so callers fall back
     to the existing answer/guard message.
     """
-    sections = [f"CURRENT USER REQUEST\n{request}"]
+    now_line = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    sections = [f"CURRENT TIME\n{now_line}", f"CURRENT USER REQUEST\n{request}"]
     if history:
         builder = ContextBuilder(agent.system_prompt, agent.context)
         sections.append("CONVERSATION HISTORY\n" + builder._render_history(history))
@@ -666,6 +724,134 @@ async def _final_generation(
         duration_ms=round((time.perf_counter() - final_started) * 1000, 1),
     )
     return response.text or ""
+
+
+async def _reflect_experience(
+    agent: Agent,
+    state: RunState,
+    request: str,
+    stop_reason: str,
+    log: RunLog,
+    debug,
+) -> Optional[dict]:
+    """Distill a finished run into one reusable experience (JSON record).
+
+    One tool-free model call: the model writes problem_type / keywords / method
+    / result / success. ``method`` must stay methodology-only (which tools,
+    what sequence, what to avoid) — never specific results. Returns None on any
+    failure so the loop never depends on this pass.
+    """
+    if state.tool_calls == 0:
+        return None
+    try:
+        tool_lines = []
+        for obs in state.observations[-15:]:
+            args = obs.arguments or {}
+            compact = dict(list(args.items())[:3])
+            rendered = json.dumps(compact, ensure_ascii=False, default=str)[:150]
+            tool_lines.append(f"- step {obs.step}: {obs.tool}({rendered}) -> {obs.status}")
+        now_line = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        body = (
+            f"CURRENT TIME\n{now_line}"
+            f"\n\nCURRENT REQUEST\n{(request or '')[:500]}"
+            f"\n\nTOOL SEQUENCE\n{chr(10).join(tool_lines) or '(none)'}"
+            f"\n\nFINAL ANSWER\n{(state.final_text or '')[:600]}"
+            f"\n\nSTOP REASON: {stop_reason}"
+        )
+        prompt = (
+            "You are the memory module of an agent harness. Distill this run into "
+            "ONE reusable experience so the same task is faster next time. Record "
+            "the METHODOLOGY (which tools, what sequence, what to avoid) — never "
+            "specific results or snippets. time_sensitive is true only when the "
+            "method's usefulness depends on WHEN it runs (weather, news, prices, "
+            "stock, events); false for stable methodology (reading files, coding "
+            "steps).\n\n"
+            "Output ONLY a JSON object (no markdown fences, no commentary) with keys:\n"
+            '{"problem_type": "<short category, e.g. weather_query|file_question|'
+            'code_change|web_search>", "keywords": ["<3-8 searchable terms, in the '
+            'same language as the request>"], "method": "<the simplest reusable path, '
+            '<=200 chars>", "result": "<one line about the outcome>", '
+            '"success": true_or_false, "time_sensitive": true_or_false}'
+        )
+        messages = [
+            Message(role="system", content=prompt),
+            Message(role="user", content=body),
+        ]
+        await debug(
+            1,
+            "model_call_start",
+            step=state.steps + 1,
+            max_steps=state.steps + 1,
+            phase="reflect",
+        )
+        started = time.perf_counter()
+        response = await asyncio.wait_for(
+            agent.model.respond(messages, [], on_token=None),
+            timeout=agent.runtime.model_timeout,
+        )
+        await debug(
+            1,
+            "model_response",
+            step=state.steps + 1,
+            usage=response.usage,
+            tool_calls=[],
+            metrics=response.metrics,
+            duration_ms=round((time.perf_counter() - started) * 1000, 1),
+        )
+        return _normalize_experience(
+            _parse_json_object(response.text or ""), request, stop_reason, state
+        )
+    except Exception as exc:
+        log.record("experience_reflect_error", error=f"{type(exc).__name__}: {exc}")
+        return None
+
+
+def _parse_json_object(text: str) -> Optional[dict]:
+    """Extract the first JSON object from a model reply; return None if absent."""
+    text = (text or "").strip()
+    if text.lower().startswith("json"):
+        text = text[4:].strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _normalize_experience(
+    data: Optional[dict],
+    request: str,
+    stop_reason: str,
+    state: RunState,
+) -> Optional[dict]:
+    """Validate and normalize a reflected experience into a store-ready dict."""
+    if not isinstance(data, dict):
+        return None
+    problem = str(data.get("problem_type") or "").strip()[:80]
+    method = " ".join(str(data.get("method") or "").split())[:400]
+    if not problem or not method:
+        return None
+    keywords = [str(k).strip()[:30] for k in (data.get("keywords") or [])]
+    keywords = [k for k in keywords if k][:12]
+    result = " ".join(str(data.get("result") or "").split())[:200]
+    success = bool(data.get("success", True))
+    time_sensitive = bool(data.get("time_sensitive", False))
+    return {
+        "request": (request or "").strip()[:200],
+        "problem_type": problem,
+        "keywords": keywords,
+        "method": method,
+        "result": result,
+        "success": success,
+        "time_sensitive": time_sensitive,
+        "stop_reason": stop_reason,
+        "steps": int(state.steps),
+        "tool_calls": int(state.tool_calls),
+    }
 
 
 def _write_log(log_dir: str, log: RunLog) -> None:

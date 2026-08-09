@@ -14,10 +14,11 @@ from .env by the provider layer — see ``agents/`` for ready-made examples:
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
-from .context import ContextConfig
+from .context import ContextConfig, environment_info
 from .model import Model
 from .providers import resolve
 from .tool import Tool, ToolContext, select_tools
@@ -55,6 +56,7 @@ class Agent:
     model_timeout: float = 90.0
     request_timeout: float = 300.0
     final_regenerate: bool = True
+    experience_enabled: bool = True  # use the experience/evolution module
     workdir: Optional[str] = None
     log_dir: Optional[str] = None
     max_tool_result_chars: int = 8000
@@ -102,6 +104,7 @@ class Agent:
             model_timeout=self.model_timeout,
             request_timeout=self.request_timeout,
             final_regenerate=self.final_regenerate,
+            experience_enabled=self.experience_enabled,
             workdir=workdir if workdir is not None else self.workdir,
             log_dir=log_dir if log_dir is not None else self.log_dir,
         )
@@ -112,6 +115,18 @@ class Agent:
         self.bootstrap = bootstrap if bootstrap is not None else self.bootstrap
         self.memory = memory
         self.session_id = session_id
+        # Time state: the agent always knows its own clock. ``started_at`` is
+        # when this agent instance (chat session) was created; ``last_run_at``
+        # is refreshed at the start of every run.
+        self.started_at = datetime.now().astimezone()
+        self.last_run_at: Optional[datetime] = None
+        # Environment: OS / Python / terminal / shell / user / cwd, so hooks
+        # and tools can adapt without re-detecting it themselves.
+        self.environment: dict[str, str] = environment_info()
+
+    def now(self) -> datetime:
+        """Current local time, so hooks/tools can read the agent's clock."""
+        return datetime.now().astimezone()
 
     @staticmethod
     def _private_tools(items) -> list[Tool]:

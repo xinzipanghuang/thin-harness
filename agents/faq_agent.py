@@ -47,6 +47,9 @@ class FAQAgent(Agent):
     tool_timeout = 60
     max_consecutive_failures = 3
     keep_recent_observations = 8
+    # Document Q&A is document-specific: historical shortcuts add noise rather
+    # than help, so the FAQ agent does not inject or record experiences.
+    experience_enabled = False
 
     async def bootstrap(self, ctx: ToolContext) -> list[Observation]:
         """Pre-search: list candidate documents before the first model call."""

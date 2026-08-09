@@ -167,6 +167,7 @@ class RuntimeConfig:
     model_timeout: float = 90.0  # per model call
     request_timeout: float = 300.0  # whole run
     final_regenerate: bool = True  # one tool-free final pass to polish the answer
+    experience_enabled: bool = True  # evolution module: inject + record experiences
     workdir: Optional[str] = None
     log_dir: Optional[str] = None
 
@@ -185,6 +186,7 @@ class ContextConfig:
     token_budget_tokens: int = 0  # 0 = disabled; when exceeded, force a stop hint
     history_max_turns: int = 12  # how many prior turns are loaded into context
     history_verbatim_turns: int = 3  # recent turns kept verbatim (older ones clipped)
+    experience_stale_days: int = 7  # time-sensitive experiences older than this are not injected
     max_evidence_items: int = 24  # cap on numbered evidence items for the final answer
     max_chars_per_evidence: int = 2000
 
