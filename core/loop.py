@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -195,6 +197,9 @@ async def run_agent(
                     stop_reason = "no_gain"
                     break
 
+                if not state.answer_hint_sent and builder.answer_hint_due(state):
+                    messages.append(builder.answer_hint_message())
+                    state.answer_hint_sent = True
                 if not state.stop_hint_sent and builder.stop_hint_due(state):
                     messages.append(builder.stop_hint_message())
                     state.stop_hint_sent = True
@@ -231,17 +236,9 @@ async def run_agent(
                 )
                 call_started = time.perf_counter()
                 try:
-                    # With final_regenerate on and tools already used, the draft
-                    # answer is not streamed — the polished final pass below is
-                    # what the user sees. Tool-free runs stream normally.
-                    call_on_token = (
-                        None
-                        if agent.runtime.final_regenerate and state.tool_calls > 0
-                        else on_token
-                    )
                     response = await asyncio.wait_for(
                         agent.model.respond(
-                            list(messages), model_tools, on_token=call_on_token
+                            list(messages), model_tools, on_token=on_token
                         ),
                         timeout=agent.runtime.model_timeout,
                     )
@@ -295,9 +292,9 @@ async def run_agent(
                     for call in raw_calls
                 ]
                 budget_exhausted = len(calls) < len(response.tool_calls)
-                observations_before = len(state.observations)
                 artifacts_before = len(state.artifacts)
                 facts_before = len(state.facts)
+                evidence_before = len(state.evidence)
                 recorded = await _execute_calls(agent, ctx, state, calls, log, debug)
                 for call, obs in zip(calls, recorded):
                     messages.append(builder.tool_result_message(call, obs))
@@ -305,11 +302,7 @@ async def run_agent(
                     messages.append(builder.facts_message(state.facts[fact_cursor:]))
                     fact_cursor = len(state.facts)
                 gain = (
-                    sum(
-                        1
-                        for obs in state.observations[observations_before:]
-                        if obs.status == "success"
-                    )
+                    (len(state.evidence) - evidence_before)
                     + (len(state.artifacts) - artifacts_before)
                     + (len(state.facts) - facts_before)
                 )
@@ -317,10 +310,9 @@ async def run_agent(
                 if no_gain == 1:
                     messages.append(
                         builder.notice_message(
-                            "No new evidence in the last tool round. If you are "
-                            "reusing a historical experience, check whether it "
-                            "still applies; consider exploring an alternative "
-                            "tool or path."
+                            "The last tool round added no new evidence. Use a "
+                            "meaningfully different call only if essential "
+                            "information is still missing; otherwise answer now."
                         )
                     )
                 if budget_exhausted:
@@ -342,8 +334,7 @@ async def run_agent(
     await debug(1, "final", stop_reason=stop_reason)
     if (
         agent.runtime.final_regenerate
-        and stop_reason not in ("error", "timeout")
-        and (stop_reason != "completed" or state.tool_calls > 0)
+        and stop_reason not in ("completed", "error", "timeout")
     ):
         fallback = state.final_text or ""
         final_text = await _final_generation(
@@ -448,9 +439,9 @@ async def _run_one(
     batch_seen: set,
 ) -> ToolResult:
     await debug(1, "tool_call_start", name=call.name, arguments=call.arguments)
-    key = _call_key(call)
+    tool = by_name.get(call.name)
+    key = _call_key(call, tool, ctx.workdir)
     if key in batch_seen or key in state.call_history:
-        tool = by_name.get(call.name)
         cached = state.result_cache.get(key)
         if cached is not None and tool is not None and tool.cacheable:
             reused = ToolResult(
@@ -512,7 +503,6 @@ async def _run_one(
         )
         return blocked
     batch_seen.add(key)
-    tool = by_name.get(call.name)
     start = time.perf_counter()
     if tool is None:
         result = ToolResult(
@@ -573,7 +563,8 @@ def _record_result(
         state.consecutive_failures += 1
         status = "timeout" if result.timed_out else "error"
 
-    key = (call.name, json.dumps(call.arguments, sort_keys=True, ensure_ascii=False, default=str))
+    tool = next((t for t in agent.tools if t.name == call.name), None)
+    key = _call_key(call, tool, ctx.workdir)
     if key in state.call_history:
         state.repeated_calls.append(call.name)
         state.harness_notices.append(
@@ -585,7 +576,6 @@ def _record_result(
         state.call_history[key] = state.steps
 
     if result.ok and not result.cached and not result.blocked:
-        tool = next((t for t in agent.tools if t.name == call.name), None)
         if tool is not None and tool.cacheable:
             state.result_cache[key] = result
 
@@ -647,10 +637,39 @@ def _guard_message(state: RunState, reason: str) -> str:
     return "\n".join(lines)
 
 
-def _call_key(call: ToolCall) -> tuple[str, str]:
+_PATH_ARGUMENTS = {"path", "root", "directory", "cwd", "workdir"}
+
+
+def _call_key(
+    call: ToolCall,
+    tool: Optional[Tool] = None,
+    workdir: Optional[str] = None,
+) -> tuple[str, str]:
+    """Return a conservative canonical key for deterministic call reuse.
+
+    Omitted defaults and syntactically equivalent path arguments should not
+    cause the same read-only operation to execute twice. Other strings are
+    left untouched because whitespace can be meaningful to tools.
+    """
+    arguments = dict(call.arguments or {})
+    if tool is not None:
+        try:
+            for name, parameter in inspect.signature(tool.fn).parameters.items():
+                if name not in arguments and parameter.default is not inspect.Parameter.empty:
+                    arguments[name] = parameter.default
+        except (TypeError, ValueError):
+            pass
+    for name in _PATH_ARGUMENTS.intersection(arguments):
+        value = arguments[name]
+        if not isinstance(value, str) or not value:
+            continue
+        path = Path(value).expanduser()
+        if not path.is_absolute() and workdir:
+            path = Path(workdir) / path
+        arguments[name] = os.path.normcase(str(path.resolve(strict=False)))
     return (
         call.name,
-        json.dumps(call.arguments, sort_keys=True, ensure_ascii=False, default=str),
+        json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str),
     )
 
 
@@ -692,13 +711,15 @@ async def _final_generation(
         sections.append("AUTHORIZED EVIDENCE\n" + "\n".join(lines))
     body = (
         "\n\n".join(sections)
-        + "\n\nAnswer the user's request directly based only on the information above. "
-        "Do not call tools."
-        + "\nIf you used tools to read files or documents, ground your answer in that "
-        "evidence and do not invent facts or sources. For general or conversational "
-        "questions, answer from your own knowledge — do not refuse just because no file "
-        "matched. If the user asked about specific files and the evidence does not "
-        "contain the answer, say what is missing or that you cannot confirm."
+        + "\n\nAnswer the user's request directly and concisely. Do not call tools. "
+        "Treat only successful tool output and VERIFIED FACTS as confirmed evidence. "
+        "A conclusion derived from evidence is an inference and must be worded as one. "
+        "Failed, blocked, or cached calls add no new evidence, and missing information "
+        "must remain unknown rather than being guessed. Do not narrate the internal tool "
+        "process unless it affects the reliability of the answer. For general or "
+        "conversational questions, you may answer from your own knowledge; for claims "
+        "about specific local or external content, say what cannot be confirmed when the "
+        "evidence is insufficient."
     )
     messages = [
         Message(role="system", content=agent.system_prompt),

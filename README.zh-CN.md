@@ -55,9 +55,9 @@ thin-harness 是一个小巧、通用的 Python 框架，用来构建你自己�
   缓存。最近的对话轮次全文保留（指代如"那个文档"可消解），更早的轮次裁剪。
 - **结构化世界状态。** 观察、事实、artifact 放在 `RunState` 里，而不是一条
   无限增长的原始消息列表。
-- **有依据的终局重生成。** 使用过工具后，用一次无工具调用在编号证据
-  （`AUTHORIZED EVIDENCE`）之上重新生成答案。引用是建议性的，不是知识库式
-  的强制契约：通用问题用模型自身知识回答，绝不因为"没有文件匹配"就拒绝。
+- **有依据的防护恢复。** 正常完成的答案直接返回；确定性防护先于模型回答而
+  终止循环时，才用一次无工具调用在编号证据（`AUTHORIZED EVIDENCE`）之上
+  生成答案。引用是建议性的，不是知识库式的强制契约。
 - **只读工具缓存复用。** 只读工具的精确重复调用直接返回上次结果（标记
   `Reused previous result`），不重复执行也不报错；非 cacheable 的重复调用
   会被阻止。
@@ -82,8 +82,10 @@ sequenceDiagram
     else 模型返回最终文本
         M-->>L: 答案
     end
-    L->>M: 终局重生成（无工具，基于编号证据）
-    M-->>L: 有依据的答案
+    opt 防护在答案生成前终止循环
+        L->>M: 终局生成（无工具，基于编号证据）
+        M-->>L: 有依据的答案
+    end
 ```
 
 ## 架构
@@ -91,7 +93,7 @@ sequenceDiagram
 ```text
 core/
   agent.py     Agent = 模型 + 系统提示词 + 选定工具 + 运行策略
-  loop.py      主循环 + 确定性防护；缓存复用；终局重生成
+  loop.py      主循环 + 确定性防护；缓存复用；防护终局生成
   model.py     模型接口 + OpenAIModel（OpenAI SDK，任意兼容 base_url）
                + ScriptedModel/EchoModel（离线）
   providers.py 通用 .env（key/base_url/model/thinking）-> OpenAI SDK
@@ -356,7 +358,8 @@ Agent 还可覆写行为钩子：`on_run_start`、`bootstrap`（模型调用前�
   并提示修改参数或按 `next_offset` 继续；
 - `max_consecutive_no_gain` —— 连续 N 轮无新证据则强制终局；
 - `max_consecutive_failures` —— 持续失败即终止；
-- `final_regenerate` —— 使用过工具后，在编号证据之上做一次无工具重生成；
+- `final_regenerate` —— 确定性防护在模型回答前终止循环时，基于编号证据做一次
+  无工具终局生成；正常完成的答案直接返回；
 - `token_budget_tokens`（ContextConfig）—— 设置后，估算上下文（bytes/4）
   超预算会注入停止提示；每次调用的 debug 含 TTFT（`connect_ms` /
   `ttft_ms`）。

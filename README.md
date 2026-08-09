@@ -61,11 +61,10 @@ Both are design references only; no code is copied or imported.
   turns are clipped.
 - **Structured world state.** Observations, facts, and artifacts live in a
   `RunState`, not in an ever-growing raw message list.
-- **Grounded final pass.** After tools are used, one tool-free call
-  regenerates the answer over numbered evidence (`AUTHORIZED EVIDENCE`).
-  Citations are advisory, not a mandatory knowledge-base contract: general
-  questions answer from the model's own knowledge and never refuse just
-  because no file matched.
+- **Grounded guard recovery.** A normally completed answer is returned
+  directly. If a deterministic guard stops the loop first, one tool-free call
+  synthesizes an answer over numbered evidence (`AUTHORIZED EVIDENCE`).
+  Citations remain advisory rather than a mandatory knowledge-base contract.
 - **Read-only cache reuse.** Exact repeated calls to read-only tools return
   the previous result (marked `Reused previous result`) instead of
   re-executing or erroring; non-cacheable duplicates are blocked.
@@ -90,8 +89,10 @@ sequenceDiagram
     else model returns final text
         M-->>L: answer
     end
-    L->>M: final regeneration (tool-free, over numbered evidence)
-    M-->>L: grounded answer
+    opt a guard stops the loop before an answer
+        L->>M: final synthesis (tool-free, over numbered evidence)
+        M-->>L: grounded answer
+    end
 ```
 
 ## Architecture
@@ -380,8 +381,9 @@ pre-model work, e.g. the FAQ pre-search), and `on_tool_result`.
 - `max_consecutive_no_gain` — N rounds with no new evidence force the final
   pass;
 - `max_consecutive_failures` — stop a run that keeps failing;
-- `final_regenerate` — one tool-free pass over numbered evidence after tools
-  were used;
+- `final_regenerate` — one tool-free pass over numbered evidence when a
+  deterministic guard stops the loop before the model answers; normally
+  completed answers are returned directly;
 - `token_budget_tokens` (ContextConfig) — when set, exceeding the estimated
   budget (bytes/4) injects a stop hint; per-call timings include TTFT
   (`connect_ms` / `ttft_ms` in debug).

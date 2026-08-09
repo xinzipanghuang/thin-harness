@@ -222,7 +222,13 @@ class ContextBuilder:
     def tool_result_message(self, call: ToolCall, obs: Observation) -> Message:
         """One tool message per executed call, tied to the assistant call id."""
         lines = [f"{obs.tool} -> {obs.status}: {obs.summary}"]
-        if obs.preview and obs.preview != obs.summary:
+        # Cached and blocked calls must still receive a tool-protocol response,
+        # but replaying their old payload only adds duplicate context.
+        if (
+            obs.status not in ("cached", "blocked")
+            and obs.preview
+            and obs.preview != obs.summary
+        ):
             preview = obs.preview
             if len(preview) > self.config.max_tool_result_chars:
                 preview = preview[: self.config.max_tool_result_chars] + "…"
@@ -255,6 +261,17 @@ class ContextBuilder:
 
     def notice_message(self, text: str) -> Message:
         return Message(role="user", content=f"HARNESS NOTICE\n{text}")
+
+    def answer_hint_due(self, state: RunState) -> bool:
+        """Suggest answering once the run has accumulated usable evidence."""
+        cfg = self.config
+        return (
+            state.steps >= cfg.answer_hint_after_steps
+            and len(state.evidence) >= cfg.answer_hint_min_evidence
+        )
+
+    def answer_hint_message(self) -> Message:
+        return Message(role="user", content="ANSWER HINT\n" + self._answer_hint_text())
 
     def stop_hint_due(self, state: RunState) -> bool:
         """Hint fires only after enough steps + non-cached successes + stagnation."""
@@ -397,6 +414,14 @@ class ContextBuilder:
         source = f" (source: {fact.source})" if fact.source else ""
         via = f" [via {fact.tool}]" if fact.tool else ""
         return f"[{fact.id}] {value}{source}{via}"
+
+    @staticmethod
+    def _answer_hint_text() -> str:
+        return (
+            "You already have usable evidence. Answer now unless you can name one "
+            "specific fact required by the request that is still missing. Additional "
+            "exploration should be necessary, not merely helpful."
+        )
 
     @staticmethod
     def _stop_hint_text() -> str:

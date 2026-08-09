@@ -134,6 +134,7 @@ class RunState:
     repeated_calls: list[str] = field(default_factory=list)
     harness_notices: list[str] = field(default_factory=list)
     final_text: Optional[str] = None
+    answer_hint_sent: bool = False
     stop_hint_sent: bool = False
     last_estimated_tokens: int = 0
     evidence: list[Evidence] = field(default_factory=list)
@@ -166,7 +167,9 @@ class RuntimeConfig:
     max_consecutive_no_gain: int = 2  # tool rounds with no new evidence -> force final
     model_timeout: float = 90.0  # per model call
     request_timeout: float = 300.0  # whole run
-    final_regenerate: bool = True  # one tool-free final pass to polish the answer
+    # Synthesize an answer only when a deterministic guard stops the main loop
+    # before the model answers; normally completed answers are used directly.
+    final_regenerate: bool = True
     experience_enabled: bool = True  # evolution module: inject + record experiences
     workdir: Optional[str] = None
     log_dir: Optional[str] = None
@@ -178,6 +181,10 @@ class ContextConfig:
 
     max_tool_result_chars: int = 8000
     keep_recent_observations: int = 5
+    # Once useful evidence exists, remind the model that answering is preferred
+    # over optional exploration. This is advisory and task-independent.
+    answer_hint_after_steps: int = 3
+    answer_hint_min_evidence: int = 2
     # answer-now hint: injected when the run has enough steps and non-cached
     # successes, and the most recent tool rounds added no new evidence.
     stop_hint_after_steps: int = 6

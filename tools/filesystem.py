@@ -84,25 +84,67 @@ def write(ctx: ToolContext, path: str, content: str) -> str:
 
 
 @tool(name="filesystem.list", cacheable=True)
-def list_dir(ctx: ToolContext, path: str = ".") -> list[dict]:
-    """List directory entries with name, type, and size.
+def list_dir(
+    ctx: ToolContext,
+    path: str = ".",
+    depth: int = 1,
+    max_results: int = 200,
+) -> dict:
+    """List directory entries with relative path, type, and size.
+
+    The listing can include a small bounded subtree, so one call can provide
+    enough structure without repeatedly listing every child directory.
 
     Args:
         path: Directory path (absolute, or relative to the run workdir).
+        depth: Directory levels to include (1-3).
+        max_results: Maximum entries to return (1-1000).
     """
     p = _resolve(ctx, path)
     if not p.is_dir():
         raise ValueError(f"Not a directory: {p}")
-    entries = []
-    for child in sorted(p.iterdir(), key=lambda c: c.name.lower()):
+    levels = clamp_int(depth, 1, 3, 1)
+    limit = clamp_int(max_results, 1, 1000, 200)
+    entries: list[dict] = []
+    truncated = False
+
+    def visit(directory: Path, level: int) -> None:
+        nonlocal truncated
         try:
-            size = child.stat().st_size if child.is_file() else None
+            children = sorted(directory.iterdir(), key=lambda child: child.name.lower())
         except OSError:
-            size = None
-        entries.append(
-            {"name": child.name, "type": "dir" if child.is_dir() else "file", "size": size}
-        )
-    return entries
+            return
+        for child in children:
+            if len(entries) >= limit:
+                truncated = True
+                return
+            try:
+                is_dir = child.is_dir()
+                size = child.stat().st_size if not is_dir else None
+            except OSError:
+                is_dir = False
+                size = None
+            entries.append(
+                {
+                    "name": child.name,
+                    "path": str(child.relative_to(p)),
+                    "type": "dir" if is_dir else "file",
+                    "size": size,
+                }
+            )
+            if is_dir and level < levels:
+                visit(child, level + 1)
+                if truncated:
+                    return
+
+    visit(p, 1)
+    return {
+        "path": str(p),
+        "depth": levels,
+        "count": len(entries),
+        "truncated": truncated,
+        "items": entries,
+    }
 
 
 @tool(cacheable=True)
