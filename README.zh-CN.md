@@ -315,6 +315,10 @@ Agent 自身也持有时间状态：每个 `Agent` 实例暴露 `started_at`、
 顺序一眼可辨；`VERIFIED FACTS` 只注入最近 `max_facts`（默认 15）条，避免
 陈旧话题淹没当前话题。
 
+调试记录保持可信：`Turn.seq` 迁移为 `AUTOINCREMENT`（清空会话后不再复用
+轮次号），启动时 `Memory` 自动清理指向已删除 turn 或时间戳不可能的事件；
+按 run 审计请用 `Memory.load_debug(run_id)`。
+
 ## 添加一个工具
 
 工具是最主要的扩展面。运行时自动发现它们，并从类型注解、默认值和

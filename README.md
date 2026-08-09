@@ -333,6 +333,11 @@ number and the rendered section ends by marking the latest turn, so the order
 is unambiguous at a glance; `VERIFIED FACTS` is capped at `max_facts` (default
 15) so stale topics cannot crowd out the recent thread.
 
+Debug records stay trustworthy: `Turn.seq` is migrated to `AUTOINCREMENT` (so
+cleared sessions never recycle turn numbers), and on startup `Memory` prunes
+debug events that reference deleted turns or impossible old timestamps — use
+`Memory.load_debug(run_id)` for per-run audit data.
+
 ## Adding a tool
 
 Tools are the primary extension surface. The runtime discovers them

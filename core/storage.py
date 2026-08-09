@@ -118,6 +118,8 @@ class Memory:
         self.db.connect()
         self.db.create_tables([Session, Turn, Fact, Artifact, Experience, DebugEvent])
         try:
+            self._ensure_turn_autoincrement()
+            self._prune_debug_events()
             self.dedupe_experiences()
         except Exception:
             # Startup must never fail because of an optional cleanup pass.
@@ -126,6 +128,60 @@ class Memory:
     def close(self) -> None:
         if not self.db.is_closed():
             self.db.close()
+
+    def _ensure_turn_autoincrement(self) -> None:
+        """Recreate the ``turn`` table with AUTOINCREMENT when needed.
+
+        SQLite reuses plain ``INTEGER PRIMARY KEY`` rowids after deletions, so
+        a cleared session's turn numbers get recycled and old debug events
+        start colliding with the new turns. AUTOINCREMENT keeps ``seq``
+        monotonic, which makes per-turn debug queries reliable again.
+        """
+        row = self.db.execute_sql(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='turn'"
+        ).fetchone()
+        if row is None or "AUTOINCREMENT" in (row[0] or "").upper():
+            return
+        with self.db.atomic():
+            self.db.execute_sql('ALTER TABLE "turn" RENAME TO "turn_old"')
+            self.db.execute_sql(
+                'CREATE TABLE "turn" ('
+                '"seq" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, '
+                '"id" VARCHAR(255) NOT NULL, '
+                '"session_id" VARCHAR(255) NOT NULL, '
+                '"request" TEXT NOT NULL, '
+                '"response" TEXT NOT NULL, '
+                '"stop_reason" VARCHAR(255) NOT NULL, '
+                '"steps" INTEGER NOT NULL, '
+                '"tool_calls" INTEGER NOT NULL, '
+                '"failures" INTEGER NOT NULL, '
+                '"created_at" DATETIME NOT NULL, '
+                'FOREIGN KEY ("session_id") REFERENCES "session" ("id"))'
+            )
+            self.db.execute_sql(
+                'INSERT INTO "turn" (seq, id, session_id, request, response, '
+                "stop_reason, steps, tool_calls, failures, created_at) "
+                'SELECT seq, id, session_id, request, response, stop_reason, '
+                "steps, tool_calls, failures, created_at FROM \"turn_old\""
+            )
+            self.db.execute_sql('DROP TABLE "turn_old"')
+
+    def _prune_debug_events(self) -> None:
+        """Drop debug events that cannot belong to a live turn.
+
+        Two kinds are removed: true orphans (their turn row is gone) and
+        recycled-id collisions (an event created hours before the turn it now
+        points to existed — impossible for a real run, whose events always
+        precede the turn's own ``created_at`` save time by at most minutes).
+        """
+        self.db.execute_sql(
+            "DELETE FROM debugevent WHERE turn_id NOT IN (SELECT seq FROM turn)"
+        )
+        self.db.execute_sql(
+            "DELETE FROM debugevent WHERE datetime(created_at) < "
+            "(SELECT datetime(t.created_at, '-7200 seconds') "
+            " FROM turn t WHERE t.seq = debugevent.turn_id)"
+        )
 
     def __enter__(self) -> "Memory":
         return self
