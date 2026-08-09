@@ -73,7 +73,9 @@ async def run_agent(
     ctx.facts = state.facts
     fact_cursor = 0
     persisted_fact_cursor = 0
-    debug_events: list[DebugEvent] = []
+    debug_events = state.debug_events
+    custom_finalize = type(agent).finalize is not Agent.finalize
+    model_on_token = None if custom_finalize else on_token
 
     # Codex-style memory: load prior turns, verified facts and reusable
     # experiences ("evolution") into context.
@@ -238,7 +240,7 @@ async def run_agent(
                 try:
                     response = await asyncio.wait_for(
                         agent.model.respond(
-                            list(messages), model_tools, on_token=on_token
+                            list(messages), model_tools, on_token=model_on_token
                         ),
                         timeout=agent.runtime.model_timeout,
                     )
@@ -338,13 +340,26 @@ async def run_agent(
     ):
         fallback = state.final_text or ""
         final_text = await _final_generation(
-            agent, state, request, history, on_token, log, debug
+            agent, state, request, history, model_on_token, log, debug
         )
         if final_text:
             state.final_text = final_text
             log.record("final_generation", text=final_text)
         else:
             state.final_text = fallback
+    try:
+        finalized = await agent.finalize(ctx, state.final_text or "", state)
+        if finalized is not None:
+            state.final_text = str(finalized)
+        log.record("finalized", custom=custom_finalize)
+        await debug(1, "finalize", custom=custom_finalize)
+    except Exception as exc:
+        state.harness_notices.append(
+            f"Finalize hook failed: {type(exc).__name__}: {exc}"
+        )
+        log.record("hook_error", hook="finalize", error=f"{type(exc).__name__}: {exc}")
+    if custom_finalize and on_token is not None and state.final_text:
+        await on_token(state.final_text)
     if memory is not None and session_id:
         try:
             memory.save_run(
@@ -455,6 +470,7 @@ async def _run_one(
                 blocked=False,
                 cached=True,
                 preview=cached.preview,
+                provenance=dict(cached.provenance),
             )
             await debug(
                 1,
@@ -465,6 +481,7 @@ async def _run_one(
                 duration_ms=0,
                 artifact_id=reused.artifact_id,
                 truncated=reused.truncated,
+                provenance=reused.provenance,
             )
             log.record(
                 "tool_call",
@@ -527,6 +544,7 @@ async def _run_one(
         duration_ms=round((time.perf_counter() - start) * 1000, 1),
         truncated=result.truncated,
         artifact_id=result.artifact_id,
+        provenance=result.provenance,
     )
     log.record(
         "tool_call",
@@ -539,6 +557,7 @@ async def _run_one(
         timed_out=result.timed_out,
         artifact_id=result.artifact_id,
         truncated=result.truncated,
+        provenance=result.provenance,
     )
     return result
 
@@ -590,6 +609,7 @@ def _record_result(
         arguments=call.arguments,
         truncated=result.truncated,
         artifact_id=result.artifact_id,
+        provenance=dict(result.provenance),
         step=state.steps,
     )
     state.observations.append(observation)
@@ -610,6 +630,7 @@ def _record_result(
                         or call.arguments.get("artifact_id")
                         or ""
                     ),
+                    provenance=dict(result.provenance),
                 )
             )
     if result.artifact_id:
@@ -619,6 +640,7 @@ def _record_result(
                 tool=call.name,
                 summary=result.summary,
                 size=ctx.artifact_store.size(result.artifact_id),
+                provenance=dict(result.provenance),
             )
         )
     return observation
@@ -708,6 +730,11 @@ async def _final_generation(
                 lines.append("    " + item.preview)
             if item.source:
                 lines.append(f"    source: {item.source}")
+            if item.provenance:
+                lines.append(
+                    "    provenance: "
+                    + json.dumps(item.provenance, ensure_ascii=False, default=str)
+                )
         sections.append("AUTHORIZED EVIDENCE\n" + "\n".join(lines))
     body = (
         "\n\n".join(sections)

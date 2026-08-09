@@ -237,6 +237,9 @@ class ContextBuilder:
             lines.append(
                 f"[saved as artifact {obs.artifact_id}; read with artifacts.read]"
             )
+        if obs.provenance:
+            provenance = json.dumps(obs.provenance, ensure_ascii=False, default=str)
+            lines.append(f"[provenance] {self._clip(provenance, 1000)}")
         if obs.status == "cached":
             lines.append(
                 "[cached — identical call reuses the previous result; no new information]"

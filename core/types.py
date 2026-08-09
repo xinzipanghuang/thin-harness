@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -49,6 +50,7 @@ class ToolResult:
     blocked: bool = False  # harness blocked a duplicate call before execution
     cached: bool = False  # result reused from an identical earlier call (no new evidence)
     preview: Optional[str] = None
+    provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -62,6 +64,7 @@ class Observation:
     arguments: Optional[dict[str, Any]] = None
     truncated: bool = False
     artifact_id: Optional[str] = None
+    provenance: dict[str, Any] = field(default_factory=dict)
     step: int = 0
 
 
@@ -84,6 +87,7 @@ class Evidence:
     summary: str
     preview: str = ""
     source: str = ""
+    provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -94,6 +98,7 @@ class Artifact:
     tool: str
     summary: str
     size: int
+    provenance: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utcnow)
 
 
@@ -138,6 +143,7 @@ class RunState:
     stop_hint_sent: bool = False
     last_estimated_tokens: int = 0
     evidence: list[Evidence] = field(default_factory=list)
+    debug_events: list[DebugEvent] = field(default_factory=list, repr=False)
     _evidence_keys: set = field(default_factory=set, repr=False)
 
 
@@ -207,3 +213,26 @@ class RunResult:
     state: RunState
     stop_reason: str  # completed | max_steps | max_tool_calls | consecutive_failures | error
     log: Optional[Any] = None
+
+    def trace(self) -> dict[str, Any]:
+        """Return a serializable, complete view of the run trajectory."""
+        return {
+            "run_id": getattr(self.log, "run_id", ""),
+            "request": self.state.request,
+            "stop_reason": self.stop_reason,
+            "steps": self.state.steps,
+            "tool_calls": self.state.tool_calls,
+            "failures": self.state.failures,
+            "observations": [asdict(item) for item in self.state.observations],
+            "facts": [asdict(item) for item in self.state.facts],
+            "evidence": [asdict(item) for item in self.state.evidence],
+            "artifacts": [asdict(item) for item in self.state.artifacts],
+            "notices": list(self.state.harness_notices),
+            "debug_events": [asdict(item) for item in self.state.debug_events],
+            "events": list(getattr(self.log, "entries", []) or []),
+            "answer": self.text,
+        }
+
+    def trace_json(self, *, indent: int = 2) -> str:
+        """Serialize :meth:`trace` for logs, notebooks, or terminal inspection."""
+        return json.dumps(self.trace(), ensure_ascii=False, indent=indent, default=str)

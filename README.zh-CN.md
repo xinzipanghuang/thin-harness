@@ -4,16 +4,17 @@
 
 *别名：`thin-harness`* —— 取自设计理念 "thin harness"（轻薄外壳）
 
-thin-harness 是一个小巧、通用的 Python 框架，用来构建你自己的 Agent：
-**Agent 和工具由你定义，框架负责跑起来。**
+thin-harness 是一个用于理解、实验和构建可控领域 Agent 的最小本地运行时：
+**领域、工具与策略由你定义，框架负责运行主循环。**
 
 - **你的 Agent。** 继承 `Agent`，自定提示词、工具和上限；行为可控，不用
   YAML。
 - **你的工具。** 一个带类型注解的 Python 函数加 `@tool`，自动被发现。
 - **你的模型。** `.env` 四个值，任意 OpenAI 兼容端点。
 
-文档问答、编码助手、日常助手都跑在同一个框架上——变的只是你的 Agent 和
-工具。它不是知识库助手，也没有 planner、critic、多 Agent 编排。
+文档问答、生信分析、编码助手和日常助手共享同一个稳定内核。新增领域应增加
+领域包，而不是给主循环增加分支。没有 YAML、隐藏 planner、critic 或多 Agent
+编排。
 
 ## 面向对象
 
@@ -97,9 +98,10 @@ core/
   model.py     模型接口 + OpenAIModel（OpenAI SDK，任意兼容 base_url）
                + ScriptedModel/EchoModel（离线）
   providers.py 通用 .env（key/base_url/model/thinking）-> OpenAI SDK
+  registry.py  Agent 注册与声明式领域包发现
   context.py   追加式 ContextBuilder：基础消息 + 增量追加
-  tool.py      @tool 装饰器、schema 生成、执行/结果归一化
-  types.py     RunState、Observation、Fact、Evidence、Artifact、ToolResult...
+  tool.py      声明式工具包递归发现、schema、执行与结果归一化
+  types.py     RunState、provenance、trace、Evidence、Artifact、ToolResult...
   artifacts.py 大工具输出的 artifact 存储
   storage.py   基于 peewee 的 SQLite 记忆
                （Session/Turn/Fact/Artifact/DebugEvent）
@@ -111,15 +113,17 @@ tools/         自动发现的共享工具（每个模块一个命名空间）
   documents.py  documents.list/read/search/progress（pdf/docx/txt/...）
   daily.py      daily.now（本地时间）、daily.todo（本地待办清单）
 
-agents/        领域子类，不用 YAML
+agents/        内置 Agent、注册表与兼容导入
   daily_agent.py  DailyAgent（默认）：全量工具 + daily.* 日常工具
   coding_agent.py CodingAgent：文件系统/shell/python 专注
-  faq_agent.py    FAQAgent：文档问答（documents.* + 定向 filesystem）
+  faq_agent.py    domains.faq 的兼容导入
+domains/       领域包：Agent + prompt + 领域工具
+  faq/         有文档依据的 FAQ
+  bioinformatics/ FASTA/FASTQ/VCF 检查 + 结构化命令执行
 prompts/agent.md  通用 Agent 指令（共享；"先判断，再行动"）
 chat/          终端聊天：rich 渲染通道 + 简单异步消息总线
   bus.py / worker.py / channel.py
-tests/         单元 + 端到端测试（123 个，全部通过）
-examples/mock_run.py
+examples/      离线循环、FAQ 与生信入口
 ```
 
 ### 运行时数据流
@@ -155,6 +159,7 @@ from agents import create_agent
 agent = create_agent()  # 默认 DailyAgent
 result = await agent.run("Check the git status of this project.")
 print(result.text)
+print(result.trace_json())  # 完整可观察运行轨迹
 ```
 
 离线演示（无需 API key）：
@@ -162,6 +167,13 @@ print(result.text)
 ```bash
 python -m chat --demo
 python examples/mock_run.py
+```
+
+领域示例：
+
+```bash
+python examples/faq_run.py "退款政策是什么？" --documents ./docs
+python examples/bioinformatics_run.py ./data/sample.vcf
 ```
 
 ## Agent
@@ -195,6 +207,10 @@ print(result.text)
 `@agent_tool` 定义只属于某个 Agent 的私有工具；共享工具用 `@tool` 写在
 `tools/` 下（见下文）。
 
+可复用领域自己的工具放在对应领域的 `tools/` 包中。来源文件、命令、版本、
+参数或生成文件影响可复现性时，工具应返回
+`ToolResult(..., provenance={...})`。
+
 内置 Agent（用 `--agent` 选择，默认 `daily`）：
 
 - `daily` — 全量共享工具（`filesystem.*`、`shell.run`、`python.run`、
@@ -205,6 +221,24 @@ print(result.text)
   按字符窗口读取（默认 200，最大 6000，offset/next_offset 续读），用
   `documents.search` 定位关键词，用 `documents.progress` 跟踪已读覆盖，
   回答标注来源。支持 PDF、DOCX 及常见文本文件。
+- `bioinformatics` — 使用类型化工具检查 FASTA、FASTQ 和 VCF，可在不经过
+  shell 的情况下运行本地生信程序，并在最终输出和 trace 中保留来源、命令与
+  工具版本。
+
+领域 Agent 组合通用提示词和领域提示词，声明自己的工具包，并自行注册，不需要
+修改主循环：
+
+```python
+from core.agent import Agent
+from core.registry import register_agent
+
+
+@register_agent("my-domain")
+class MyDomainAgent(Agent):
+    prompt_paths = ["prompts/agent.md", "domains/my_domain/prompt.md"]
+    tool_packages = ["tools", "domains.my_domain.tools"]
+    tool_include = ["filesystem.read", "my_domain.*"]
+```
 
 ### Agent 继承关系
 
@@ -218,13 +252,16 @@ classDiagram
         +run()
         +bootstrap()
         +on_tool_result()
+        +finalize()
     }
     class DailyAgent
     class CodingAgent
     class FAQAgent
+    class BioinformaticsAgent
     Agent <|-- DailyAgent : 全量工具 + daily.*
     Agent <|-- CodingAgent : filesystem / shell / python
     Agent <|-- FAQAgent : 文档问答
+    Agent <|-- BioinformaticsAgent : 类型化生信工具
 ```
 
 ## 模型配置（.env —— 无厂商目录）
@@ -250,6 +287,7 @@ provider 层自行解析，并通过 OpenAI SDK 与任意 OpenAI 兼容端点（
 ```bash
 python -m chat                      # daily agent
 python -m chat --agent faq          # 文档问答
+python -m chat --agent bioinformatics  # 类型化生信工具
 python -m chat --demo               # 离线 echo
 python -m chat --progress           # 分步进度行 + 实时计时
 python -m chat --debug 1|2|3        # 分级运行时调试
@@ -259,7 +297,8 @@ python -m chat --markdown           # 完整实时 Markdown（ANSI 终端）
 ```
 
 聊天内命令：`/help`、`/clear`（清空会话记忆）、`/tools`（列出当前 Agent 的
-工具及用途）、`/exit`。`Ctrl+C` 干净退出；`Shift+Enter` 插入换行，消息可
+工具及用途）、`/trace`（查看上一次完整运行轨迹）、`/trace RUN_ID`（读取已
+持久化轨迹）、`/exit`。`Ctrl+C` 干净退出；`Shift+Enter` 插入换行，消息可
 多行。
 
 回答逐 token 流式输出，按 Markdown 逐行渲染（不重绘，任何终端可用）。默认
@@ -372,9 +411,8 @@ Agent 还可覆写行为钩子：`on_run_start`、`bootstrap`（模型调用前�
 python -m unittest discover -s tests -t . -v
 ```
 
-123 个测试，覆盖工具/schema、主循环（防护、缓存复用、证据终局）、上下文
-构建、Agent、记忆、文档窗口读取，以及终端聊天（总线、worker、渲染、输入
-命令）。
+测试覆盖工具/schema、主循环（防护、缓存复用、证据终局）、上下文构建、
+Agent、记忆、文档窗口读取，以及终端聊天（总线、worker、渲染、输入命令）。
 
 ## 安全说明
 

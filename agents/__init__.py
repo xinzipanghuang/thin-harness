@@ -14,33 +14,25 @@ LLM_ENABLE_THINKING) by the provider layer. Pick an agent with
 from __future__ import annotations
 
 from core.agent import Agent
-from core.model import Model
+from core.registry import AGENT_REGISTRY, create_agent, discover_agent_packages, register_agent
 
 from .coding_agent import CodingAgent
 from .daily_agent import DailyAgent
-from .faq_agent import FAQAgent
 
-__all__ = ["Agent", "CodingAgent", "DailyAgent", "FAQAgent", "create_agent"]
+register_agent("coding", CodingAgent)
+register_agent("daily", DailyAgent)
+discover_agent_packages()
 
-AGENT_REGISTRY: dict[str, type[Agent]] = {
-    "coding": CodingAgent,
-    "daily": DailyAgent,
-    "faq": FAQAgent,
-}
+from domains.bioinformatics import BioinformaticsAgent
+from domains.faq import FAQAgent
 
-
-def create_agent(
-    name: str = "daily",
-    model: Model | None = None,
-    *,
-    workdir: str | None = None,
-    log_dir: str | None = None,
-) -> Agent:
-    """Instantiate a registered domain agent by name."""
-    try:
-        agent_class = AGENT_REGISTRY[name]
-    except KeyError:
-        raise ValueError(
-            f"Unknown agent {name!r} (available: {', '.join(sorted(AGENT_REGISTRY))})"
-        ) from None
-    return agent_class(model=model, workdir=workdir, log_dir=log_dir)
+__all__ = [
+    "AGENT_REGISTRY",
+    "Agent",
+    "BioinformaticsAgent",
+    "CodingAgent",
+    "DailyAgent",
+    "FAQAgent",
+    "create_agent",
+    "register_agent",
+]

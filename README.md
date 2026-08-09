@@ -4,17 +4,19 @@
 
 *Also known as: `thin-harness`* — from the design principle "thin harness"
 
-thin-harness is a small, general-purpose Python framework for building your
-own agent: **you define the agent and tools, it runs the loop.**
+thin-harness is a minimal local runtime for understanding, experimenting with,
+and building controllable domain agents: **you define the domain, tools, and
+policy; the harness runs the loop.**
 
 - **Your agents.** Subclass `Agent`; pick the prompt, tools, and limits —
   behavior stays under your control. No YAML.
 - **Your tools.** A typed Python function with `@tool`; auto-discovered.
 - **Your model.** Four values in `.env`, any OpenAI-compatible endpoint.
 
-A document FAQ, a coding helper, or a daily assistant all run on the same
-framework — only your agent and tools change. Not a knowledge-base assistant,
-and no planners, critics, or multi-agent orchestration.
+A document FAQ, a bioinformatics assistant, a coding helper, or a daily
+assistant all run on the same stable core. Adding a domain should add a domain
+package, not branches to the main loop. No YAML, hidden planners, critics, or
+multi-agent orchestration.
 
 ## Who this is for
 
@@ -104,9 +106,10 @@ core/
   model.py     Model interface + OpenAIModel (OpenAI SDK, any compatible
                base_url) + ScriptedModel/EchoModel (offline)
   providers.py Generic .env (key/base_url/model/thinking) -> OpenAI SDK
+  registry.py  Agent registration and declared domain-package discovery
   context.py   Append-only ContextBuilder: base messages + incremental appends
-  tool.py      @tool decorator, schema generation, execution/normalization
-  types.py     RunState, Observation, Fact, Evidence, Artifact, ToolResult...
+  tool.py      Recursive declared-package discovery + execution/normalization
+  types.py     RunState, provenance, trace export, evidence, artifacts...
   artifacts.py Artifact store for large tool outputs
   storage.py   SQLite memory via peewee (Session/Turn/Fact/Artifact/DebugEvent)
 
@@ -117,15 +120,17 @@ tools/         Auto-discovered shared tools (each module = a namespace)
   documents.py  documents.list/read/search/progress (pdf/docx/txt/...)
   daily.py      daily.now (local time), daily.todo (local todo list)
 
-agents/        Domain subclasses, no YAML
+agents/        Built-in agents, registry, and compatibility imports
   daily_agent.py  DailyAgent (default): full tool set + daily.* helpers
   coding_agent.py CodingAgent: filesystem/shell/python focus
-  faq_agent.py    FAQAgent: document Q&A (documents.* + targeted filesystem)
+  faq_agent.py    compatibility import for domains.faq
+domains/       Cohesive domain packages: Agent + prompt + owned tools
+  faq/         document-grounded FAQ
+  bioinformatics/ FASTA/FASTQ/VCF inspection + structured command execution
 prompts/agent.md  Generic agent instructions (shared; "decide first, then act")
 chat/          Terminal chat: rich channel + simple async message bus
   bus.py / worker.py / channel.py
-tests/         Unit + end-to-end tests (123, all green)
-examples/mock_run.py
+examples/      offline loop, FAQ, and bioinformatics entry points
 ```
 
 ### Runtime flow
@@ -161,6 +166,7 @@ from agents import create_agent
 agent = create_agent()  # DailyAgent by default
 result = await agent.run("Check the git status of this project.")
 print(result.text)
+print(result.trace_json())  # complete observable trajectory
 ```
 
 Offline demo (no API key):
@@ -168,6 +174,13 @@ Offline demo (no API key):
 ```bash
 python -m chat --demo
 python examples/mock_run.py
+```
+
+Domain examples:
+
+```bash
+python examples/faq_run.py "What is the refund policy?" --documents ./docs
+python examples/bioinformatics_run.py ./data/sample.vcf
 ```
 
 ## Agents
@@ -202,6 +215,10 @@ print(result.text)
 `@agent_tool` makes a tool private to one agent; shared tools go in `tools/`
 with `@tool` (see below).
 
+Tools owned by a reusable domain live under that domain's `tools/` package.
+Return `ToolResult(..., provenance={...})` when source files, command lines,
+versions, parameters, or generated outputs are material to reproducibility.
+
 Built-in agents (pick with `--agent`, default `daily`):
 
 - `daily` — full shared tool set (`filesystem.*`, `shell.run`, `python.run`,
@@ -213,6 +230,24 @@ Built-in agents (pick with `--agent`, default `daily`):
   `documents.read` (offset/next_offset continuation), locates keywords with
   `documents.search`, tracks coverage with `documents.progress`, and cites
   the source. Supported formats: PDF, DOCX, and common text files.
+- `bioinformatics` — inspects FASTA, FASTQ, and VCF files with typed tools,
+  can run local bioinformatics executables without a shell, and preserves
+  source/command/version provenance in the final output and run trace.
+
+Domain agents compose the shared prompt with a domain prompt, declare their
+own tool packages, and register themselves without editing the core loop:
+
+```python
+from core.agent import Agent
+from core.registry import register_agent
+
+
+@register_agent("my-domain")
+class MyDomainAgent(Agent):
+    prompt_paths = ["prompts/agent.md", "domains/my_domain/prompt.md"]
+    tool_packages = ["tools", "domains.my_domain.tools"]
+    tool_include = ["filesystem.read", "my_domain.*"]
+```
 
 ### Agent hierarchy
 
@@ -226,13 +261,16 @@ classDiagram
         +run()
         +bootstrap()
         +on_tool_result()
+        +finalize()
     }
     class DailyAgent
     class CodingAgent
     class FAQAgent
+    class BioinformaticsAgent
     Agent <|-- DailyAgent : full tools + daily.*
     Agent <|-- CodingAgent : filesystem / shell / python
     Agent <|-- FAQAgent : documents Q&A
+    Agent <|-- BioinformaticsAgent : typed bioinformatics tools
 ```
 
 ## Model config (.env — no vendor catalog)
@@ -260,6 +298,7 @@ reasoner variant).
 ```bash
 python -m chat                      # daily agent
 python -m chat --agent faq          # document Q&A
+python -m chat --agent bioinformatics  # typed bioinformatics tools
 python -m chat --demo               # offline echo
 python -m chat --progress           # per-step progress lines + live timer
 python -m chat --debug 1|2|3        # leveled runtime debug
@@ -269,7 +308,8 @@ python -m chat --markdown           # full live Markdown (ANSI terminal)
 ```
 
 In-chat commands: `/help`, `/clear` (wipe session memory), `/tools` (list the
-current agent's tools with purposes), `/exit`. `Ctrl+C` quits cleanly;
+current agent's tools with purposes), `/trace` (show the complete last run),
+`/trace RUN_ID` (load a persisted trace), `/exit`. `Ctrl+C` quits cleanly;
 `Shift+Enter` inserts a newline so a message can span several lines.
 
 Answers stream token by token and are rendered as Markdown line by line (no
@@ -396,9 +436,9 @@ No scoring systems, reflection calls, planners, or intent classifiers.
 python -m unittest discover -s tests -t . -v
 ```
 
-123 tests covering tools/schema, the loop (guards, cache reuse, evidence
-final pass), context building, agents, memory, document window reading, and
-the terminal chat (bus, worker, rendering, input commands).
+The suite covers tools/schema, the loop (guards, cache reuse, evidence final
+pass), context building, agents, memory, document window reading, and the
+terminal chat (bus, worker, rendering, input commands).
 
 ## Security notes
 

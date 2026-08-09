@@ -23,9 +23,11 @@ class AgentWorker:
         self.history: list[tuple[str, str]] = []
         self.memory = memory
         self.session_id = session_id
+        self.last_result = None
 
     def clear_history(self) -> None:
         self.history.clear()
+        self.last_result = None
         if self.memory is not None and self.session_id:
             self.memory.clear_session(self.session_id)
 
@@ -53,6 +55,7 @@ class AgentWorker:
                 )
             )
             return
+        self.last_result = result
         if self.memory is None:
             self.history.append((message.content, result.text))
             if self.history_limit and len(self.history) > self.history_limit:
@@ -70,6 +73,16 @@ class AgentWorker:
                 },
             )
         )
+
+    def get_trace(self, run_id: str = "") -> dict | None:
+        """Return the last in-memory trace or a persisted trace by run id."""
+        if self.last_result is not None:
+            trace = self.last_result.trace()
+            if not run_id or trace.get("run_id") == run_id:
+                return trace
+        if run_id and self.memory is not None:
+            return self.memory.load_trace(run_id)
+        return None
 
     async def _emit_stream(self, message_id: str, text: str) -> None:
         await self.bus.emit(OutboundEvent(kind="stream", reply_to=message_id, text=text))

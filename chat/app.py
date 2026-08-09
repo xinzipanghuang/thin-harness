@@ -34,6 +34,7 @@ async def run_chat(
     channel = TerminalChannel(
         bus,
         clear_history=worker.clear_history,
+        get_trace=worker.get_trace,
         debug_level=debug_level,
         markdown_live=markdown_live,
         progress=progress,

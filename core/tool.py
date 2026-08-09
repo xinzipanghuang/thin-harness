@@ -248,22 +248,45 @@ def is_tool_context_param(fn: Callable, param: inspect.Parameter, hints: dict[st
     return False
 
 
-def discover_tools(package_name: str = "tools") -> dict[str, Tool]:
-    """Import every module in the tools package so ``@tool`` registrations land in the registry."""
-    pkg = importlib.import_module(package_name)
-    for module_info in pkgutil.iter_modules(pkg.__path__):
-        if module_info.name.startswith("_"):
+def discover_tools(package_names: str | list[str] | tuple[str, ...] = "tools") -> dict[str, Tool]:
+    """Recursively import one or more declared tool packages.
+
+    Registration remains explicit through ``@tool``; recursion only lets a
+    domain keep its tools in a package instead of the global flat directory.
+    """
+    names = [package_names] if isinstance(package_names, str) else list(package_names)
+    for package_name in names:
+        pkg = importlib.import_module(package_name)
+        package_path = getattr(pkg, "__path__", None)
+        if package_path is None:
             continue
-        importlib.import_module(f"{package_name}.{module_info.name}")
-    return dict(TOOL_REGISTRY)
+        prefix = f"{pkg.__name__}."
+        for module_info in pkgutil.walk_packages(package_path, prefix=prefix):
+            relative = module_info.name[len(prefix) :]
+            if any(part.startswith("_") for part in relative.split(".")):
+                continue
+            importlib.import_module(module_info.name)
+    prefixes = tuple(names)
+    return {
+        name: registered
+        for name, registered in TOOL_REGISTRY.items()
+        if any(
+            registered.fn.__module__ == prefix
+            or registered.fn.__module__.startswith(f"{prefix}.")
+            for prefix in prefixes
+        )
+    }
 
 
-def select_tools(spec: dict[str, Any]) -> list[Tool]:
+def select_tools(
+    spec: dict[str, Any],
+    package_names: str | list[str] | tuple[str, ...] = "tools",
+) -> list[Tool]:
     """Resolve include/exclude patterns against the registry, deterministically."""
-    discover_tools()
+    available = discover_tools(package_names)
     include = spec.get("include") or ["*"]
     exclude = spec.get("exclude") or []
-    names = sorted(TOOL_REGISTRY)
+    names = sorted(available)
     selected = [
         name
         for name in names
@@ -273,7 +296,7 @@ def select_tools(spec: dict[str, Any]) -> list[Tool]:
     unmatched = [p for p in include if not any(_pattern_matches(p, name) for name in names)]
     if unmatched:
         raise ValueError(f"No registered tool matches include pattern(s): {', '.join(unmatched)}")
-    return [TOOL_REGISTRY[name] for name in selected]
+    return [available[name] for name in selected]
 
 
 def _pattern_matches(pattern: str, name: str) -> bool:

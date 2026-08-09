@@ -17,6 +17,7 @@ builder, save each run, remember global facts, clear a session.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -65,6 +66,7 @@ class Artifact(BaseModel):
     tool = peewee.CharField()
     summary = peewee.TextField()
     content = peewee.TextField()
+    provenance = peewee.TextField(default="{}")
     created_at = peewee.DateTimeField(default=datetime.utcnow)
 
 
@@ -119,6 +121,7 @@ class Memory:
         self.db.create_tables([Session, Turn, Fact, Artifact, Experience, DebugEvent])
         try:
             self._ensure_turn_autoincrement()
+            self._ensure_optional_columns()
             self._prune_debug_events()
             self.dedupe_experiences()
         except Exception:
@@ -165,6 +168,14 @@ class Memory:
                 "steps, tool_calls, failures, created_at FROM \"turn_old\""
             )
             self.db.execute_sql('DROP TABLE "turn_old"')
+
+    def _ensure_optional_columns(self) -> None:
+        """Add backward-compatible metadata columns to existing databases."""
+        columns = {column.name for column in self.db.get_columns("artifact")}
+        if "provenance" not in columns:
+            self.db.execute_sql(
+                'ALTER TABLE "artifact" ADD COLUMN "provenance" TEXT NOT NULL DEFAULT \'{}\''
+            )
 
     def _prune_debug_events(self) -> None:
         """Drop debug events that cannot belong to a live turn.
@@ -241,6 +252,11 @@ class Memory:
                 tool=artifact.tool,
                 summary=artifact.summary,
                 content=content or "",
+                provenance=json.dumps(
+                    getattr(artifact, "provenance", {}) or {},
+                    ensure_ascii=False,
+                    default=str,
+                ),
             ).execute()
         for event in debug_events or []:
             DebugEvent.create(
@@ -310,6 +326,24 @@ class Memory:
             return Artifact.get(Artifact.id == artifact_id).content
         except Artifact.DoesNotExist:
             return None
+
+    def load_trace(self, run_id: str) -> Optional[dict[str, Any]]:
+        """Load a persisted run summary and its structured debug events."""
+        try:
+            turn = Turn.get(Turn.id == run_id)
+        except Turn.DoesNotExist:
+            return None
+        return {
+            "run_id": turn.id,
+            "session_id": turn.session_id,
+            "request": turn.request,
+            "answer": turn.response,
+            "stop_reason": turn.stop_reason,
+            "steps": turn.steps,
+            "tool_calls": turn.tool_calls,
+            "failures": turn.failures,
+            "events": self.load_debug(turn.id),
+        }
 
     # ---- experience memory ("evolution") --------------------------------
 

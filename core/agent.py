@@ -45,8 +45,10 @@ class Agent:
     name: str = "agent"
     prompt: str = ""  # inline system prompt
     prompt_path: str = ""  # or path to a prompt file, relative to the project root
+    prompt_paths: list[str] = []  # optional composable base + domain prompts
     tool_include: list[str] = ["*"]
     tool_exclude: list[str] = []
+    tool_packages: list[str] = ["tools"]
     own_tools: list = []  # agent-private tools (Tool instances or functions)
     max_steps: int = 8
     max_tool_calls: int = 12
@@ -85,7 +87,9 @@ class Agent:
         prompt = system_prompt
         if prompt is None:
             prompt = self.prompt
-        if not prompt and self.prompt_path:
+        if not prompt and self.prompt_paths:
+            prompt = "\n\n".join(_read_prompt(path) for path in self.prompt_paths)
+        elif not prompt and self.prompt_path:
             prompt = _read_prompt(self.prompt_path)
         self.system_prompt = prompt or ""
         private_tools = self._private_tools(self.own_tools)
@@ -93,7 +97,8 @@ class Agent:
             self.tools = list(tools) + private_tools
         else:
             self.tools = select_tools(
-                {"include": list(self.tool_include), "exclude": list(self.tool_exclude)}
+                {"include": list(self.tool_include), "exclude": list(self.tool_exclude)},
+                package_names=list(self.tool_packages),
             ) + private_tools
         self.runtime = runtime or RuntimeConfig(
             max_steps=self.max_steps,
@@ -158,6 +163,10 @@ class Agent:
         result: ToolResult,
     ) -> None:
         """Override: react to every tool result (e.g. record facts)."""
+
+    async def finalize(self, ctx: ToolContext, text: str, state) -> str:
+        """Override: deterministically validate or format the final output."""
+        return text
 
     async def run(
         self,

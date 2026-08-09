@@ -25,6 +25,7 @@ Commands:
   /help     show this help
   /clear    clear conversation history
   /tools    list available tools
+  /trace    show the last run trace (/trace RUN_ID loads a persisted run)
   /exit     leave the chat
   Ctrl+C    exit (same as /quit)
   Shift+Enter  insert a newline in a message
@@ -374,6 +375,7 @@ class TerminalChannel:
         bus: MessageBus,
         console: Optional[Console] = None,
         clear_history: Optional[Callable[[], None]] = None,
+        get_trace: Optional[Callable[[str], Optional[dict]]] = None,
         debug_level: int = 0,
         markdown_live: bool = False,
         progress: bool = False,
@@ -382,6 +384,7 @@ class TerminalChannel:
         self.bus = bus
         self.console = console or Console()
         self.clear_history = clear_history
+        self.get_trace = get_trace
         self.debug_level = debug_level
         self.markdown_live = markdown_live
         self.progress = progress
@@ -505,6 +508,16 @@ class TerminalChannel:
                     console.print(table)
                 else:
                     console.print("[dim]no tools available[/dim]")
+                continue
+            if text == "/trace" or text.startswith("/trace "):
+                run_id = text[6:].strip()
+                trace = self.get_trace(run_id) if self.get_trace is not None else None
+                if trace is None:
+                    console.print("[dim]no matching run trace available[/dim]")
+                else:
+                    console.print_json(
+                        json.dumps(trace, ensure_ascii=False, default=str)
+                    )
                 continue
 
             message = InboundMessage(id=uuid.uuid4().hex[:12], channel="terminal", content=text)
