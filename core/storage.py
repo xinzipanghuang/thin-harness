@@ -201,8 +201,18 @@ class Memory:
 
     # ---- load ------------------------------------------------------------
 
-    def load_history(self, session_id: str, limit: int = 10) -> list[tuple[str, str]]:
-        """Return the most recent ``limit`` turns, oldest first."""
+    def load_history(
+        self,
+        session_id: str,
+        limit: int = 10,
+        numbered: bool = False,
+    ) -> list[tuple]:
+        """Return the most recent ``limit`` turns, oldest first.
+
+        With ``numbered=True`` each item is ``(turn.seq, request, response)``
+        so the context can label turns with their global session number
+        instead of a window-relative index (which hides recency).
+        """
         rows = (
             Turn.select()
             .join(Session)
@@ -211,16 +221,23 @@ class Memory:
             .limit(max(0, int(limit)))
         )
         rows = list(rows)
+        if numbered:
+            return [(turn.seq, turn.request, turn.response) for turn in reversed(rows)]
         return [(turn.request, turn.response) for turn in reversed(rows)]
 
-    def load_facts(self, session_id: Optional[str] = None) -> list[Fact]:
+    def load_facts(
+        self, session_id: Optional[str] = None, limit: Optional[int] = None
+    ) -> list[Fact]:
         if session_id:
             rows = Fact.select().where(
                 (Fact.session.is_null(True)) | (Fact.session_id == session_id)
             )
         else:
             rows = Fact.select().where(Fact.session.is_null(True))
-        return list(rows.order_by(Fact.id))
+        rows = rows.order_by(Fact.id.desc())
+        if limit:
+            rows = rows.limit(max(0, int(limit)))
+        return list(reversed(rows))
 
     def session_times(
         self, session_id: str

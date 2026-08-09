@@ -311,6 +311,10 @@ Agent 自身也持有时间状态：每个 `Agent` 实例暴露 `started_at`、
 （`daily.forget` 删除错误经验，`daily.experiences` 查看经验库）。用相同
 `--session` 重启 `python -m chat` 即可记住对话。
 
+“最近”是显式的：历史轮次用会话内全局编号标注，渲染末尾会点明最新一轮，
+顺序一眼可辨；`VERIFIED FACTS` 只注入最近 `max_facts`（默认 15）条，避免
+陈旧话题淹没当前话题。
+
 ## 添加一个工具
 
 工具是最主要的扩展面。运行时自动发现它们，并从类型注解、默认值和

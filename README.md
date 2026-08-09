@@ -328,6 +328,11 @@ tools, the model distills the run into one JSON experience (`daily.forget`
 deletes incorrect records; `daily.experiences` lists them). Restart `python
 -m chat` with the same `--session` and it remembers the conversation.
 
+Recency is explicit: history turns are labeled with their global session
+number and the rendered section ends by marking the latest turn, so the order
+is unambiguous at a glance; `VERIFIED FACTS` is capped at `max_facts` (default
+15) so stale topics cannot crowd out the recent thread.
+
 ## Adding a tool
 
 Tools are the primary extension surface. The runtime discovers them

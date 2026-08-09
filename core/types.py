@@ -187,6 +187,7 @@ class ContextConfig:
     history_max_turns: int = 12  # how many prior turns are loaded into context
     history_verbatim_turns: int = 3  # recent turns kept verbatim (older ones clipped)
     experience_stale_days: int = 7  # time-sensitive experiences older than this are not injected
+    max_facts: int = 15  # cap on VERIFIED FACTS injected (newest first)
     max_evidence_items: int = 24  # cap on numbered evidence items for the final answer
     max_chars_per_evidence: int = 2000
 

@@ -286,17 +286,31 @@ class ContextBuilder:
                 )
         return (total + 3) // 4
 
-    def _render_history(self, history: list[tuple[str, str]]) -> str:
+    def _render_history(self, history: list[tuple]) -> str:
         verbatim = max(0, int(self.config.history_verbatim_turns))
         start = max(0, len(history) - verbatim)
+        numbered = bool(history) and len(history[0]) == 3  # (seq, user, assistant)
         lines: list[str] = []
-        for index, (user_text, assistant_text) in enumerate(history, 1):
-            if index - 1 >= start:
-                lines.append(f"[turn {index}] user: {self._verbatim(user_text)}")
-                lines.append(f"[turn {index}] assistant: {self._verbatim(assistant_text)}")
+        last_seq: Optional[int] = None
+        for index, item in enumerate(history, 1):
+            if numbered:
+                seq, user_text, assistant_text = item
+                label = seq
+                last_seq = seq
             else:
-                lines.append(f"[turn {index}] user: {self._clip(user_text)}")
-                lines.append(f"[turn {index}] assistant: {self._clip(assistant_text)}")
+                user_text, assistant_text = item
+                label = index
+            if index - 1 >= start:
+                lines.append(f"[turn {label}] user: {self._verbatim(user_text)}")
+                lines.append(f"[turn {label}] assistant: {self._verbatim(assistant_text)}")
+            else:
+                lines.append(f"[turn {label}] user: {self._clip(user_text)}")
+                lines.append(f"[turn {label}] assistant: {self._clip(assistant_text)}")
+        if numbered and last_seq is not None:
+            lines.append(
+                f"[history note: these are the last {len(history)} turn(s) of this "
+                f"session; the latest is [turn {last_seq}]]"
+            )
         return "\n".join(lines)
 
     @staticmethod

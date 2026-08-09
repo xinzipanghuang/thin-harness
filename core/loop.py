@@ -82,9 +82,11 @@ async def run_agent(
             session_times = memory.session_times(session_id)
             if history is None:
                 history = memory.load_history(
-                    session_id, limit=agent.context.history_max_turns
+                    session_id,
+                    limit=agent.context.history_max_turns,
+                    numbered=True,
                 )
-            for fact in memory.load_facts(session_id):
+            for fact in memory.load_facts(session_id, limit=agent.context.max_facts):
                 state.facts.append(
                     Fact(
                         id=f"mem-{fact.id}",
