@@ -367,8 +367,12 @@ def _bind_arguments(tool_obj: Tool, ctx: ToolContext, arguments: dict[str, Any])
     except Exception:
         hints = {}
     kwargs: dict[str, Any] = {}
+    accepts_keyword_remainder = False
     for param_name, param in sig.parameters.items():
-        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            accepts_keyword_remainder = True
+            continue
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
             continue
         if is_tool_context_param(tool_obj.fn, param, hints):
             kwargs[param_name] = ctx
@@ -379,6 +383,8 @@ def _bind_arguments(tool_obj: Tool, ctx: ToolContext, arguments: dict[str, Any])
             kwargs[param_name] = param.default
         else:
             raise ValueError(f"missing required argument {param_name!r} for tool {tool_obj.name}")
+    if accepts_keyword_remainder:
+        kwargs.update({key: value for key, value in arguments.items() if key not in kwargs})
     return kwargs
 
 

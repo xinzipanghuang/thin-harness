@@ -389,6 +389,90 @@ Agent 私有工具（`own_tools`）。
 Agent 还可覆写行为钩子：`on_run_start`、`bootstrap`（模型调用前的廉价
 确定性工作，如 FAQ 的预检索）和 `on_tool_result`。
 
+## 添加一个受控 Skill
+
+Skill 与 Tool 一样由可信代码库中的 Python 文件定义，但它不是可执行插件。
+`core.skill` 使用不可变且拒绝未知字段的 Pydantic 模型约束 Skill；注册项只能
+包含框架认识的 Tool 步骤、质量门禁、数据引用和 JSON 常量，不能携带 callable、
+Python 源码或 shell。输入、输出由各 Skill 自己的 `BaseModel` 定义：
+
+```python
+from pydantic import BaseModel, ConfigDict
+from core.skill import (
+    InputReference, SkillDefinition, StepOutputReference,
+    ToolReference, ToolStep, register_skill,
+)
+
+class Input(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str
+
+class Output(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    report_path: str
+
+MY_SKILL = register_skill(SkillDefinition.from_models(
+    id="bio.fastq.inspect", version="1.0.0",
+    title="FASTQ inspection", description="Inspect FASTQ with an approved tool.",
+    status="approved", input_model=Input, output_model=Output,
+    steps=(ToolStep(
+        id="inspect",
+        tool=ToolReference(name="bio.fastq.inspect", version="1.0.0"),
+        arguments={"path": InputReference(path="path")},
+    ),),
+    outputs={"report_path": StepOutputReference(step="inspect", path="report_path")},
+))
+```
+
+`discover_skills(...)` 只导入程序显式配置的可信 Python 包。Registry 按
+`id + version` 管理完整合约，默认只解析 `approved` 版本，并可通过
+`SkillDefinition.to_schema()` 向 Agent 暴露与 Tool 相似的发现 Schema。
+数据库以后只需保存 `model_dump()` 后的结构、审核状态与哈希，不加载数据库中的
+Python 代码。执行前的 `validate_input()` / `validate_output()` 则使用可信 Skill
+文件中原始的 `BaseModel`（包括自定义 validator）；只有数据库 Schema、没有可信
+Python 定义的记录不能执行。完整可运行示例见 `examples/skill_registry.py`。
+
+## 可选外部 MCP
+
+Client 本身不依赖 MCP。中心 Hub 可用时，
+`core.mcp_provider.McpToolProvider` 会发现其 Catalog，并返回普通 `Tool` 对象供
+Agent 显式注入；可选 endpoint 离线时返回空列表，本地 Tool 仍可正常使用。凭据只
+从环境变量读取，WES 等领域流程知识保留在中心 Skill 中，不进入通用 Client。
+
+```python
+from core.mcp_provider import McpEndpoint, McpToolProvider
+
+provider = McpToolProvider(McpEndpoint(
+    endpoint_id="central-hub",
+    url="https://mcp.example.internal/mcp",
+    token_env="CENTRAL_MCP_TOKEN",
+))
+remote_tools = await provider.load_tools()
+```
+
+## 远程 Tool Server
+
+`tool_server/` 提供独立的显式注册与执行边界。Server 启动代码逐个
+`registry.register(...)`；它不会扫描或自动暴露本地 `tools/`，请求也不能指定
+模块、可执行程序、环境变量或任意命令行。每个 Tool 是受信任的 Python 类，声明
+自己的 Pydantic 输入/输出模型、固定 executable ID、版本与超时。
+
+默认 executable 只从启动 Server 的 `sys.executable` 所在目录和
+`sys.prefix/bin` 解析，也可以在 Tool 代码中声明经过审核的绝对路径。注册时即验证
+文件存在且可执行；子进程不用 shell，并移除常见环境注入变量。公开 Tool 接口只有
+MCP Streamable HTTP 的 `POST /mcp`，不再并存自定义 REST 协议。它默认只绑定
+`127.0.0.1`，要求至少 32 字节的 Bearer token，并且只暴露 Server 启动代码主动
+注册的 Tool。请求、完整响应、Tool catalog、参数、并发、执行时间、磁盘日志和
+stdout/stderr 预览均有独立硬上限。超大结果必须保存到数据面并只返回 URI/artifact
+ID。正式入口为 `python -m tool_server`；部署选项见 `tool_server/README.md`，显式
+组装示例见 `examples/bio_tool_server.py`。
+
+正式 Server 另有独立的持久化长任务 Skill 层。只有主动注册且状态为 `approved`
+的 `LongSkill` 才能运行固定 Tool DAG；SQLite 保存任务状态、步骤 checkpoint、
+有界结果和分页日志。当前通过稳定 MCP Tool 暴露为 `skill.<id>.submit`、
+`task.get`、`task.result`、`task.cancel` 和 `task.logs`，执行核心不依赖仍处于
+experimental 阶段的 MCP 原生 Tasks。
+
 ## 循环防护（仅确定性）
 
 - `max_steps` / `max_tool_calls` —— 模型与工具预算；
@@ -421,8 +505,8 @@ Agent、记忆、文档窗口读取，以及终端聊天（总线、worker、渲
 
 ## 刻意省略 / 扩展点
 
-- 没有 skills、workflows、DAGs、planner/critic agent、多 Agent 编排、语义
-  路由或基于 embedding 的工具选择。
+- 已有封闭式 typed Skill 合约与 Registry；Workflow 执行器、远程 Provider、
+  planner/critic agent、多 Agent 编排、语义路由和 embedding 工具选择仍未实现。
 - Artifact 单次运行内驻留内存（磁盘持久化是未来扩展）。
 - 事实提取只做显式记录（`ctx.record_fact`）；没有自动 critic。
 - 历史压缩暂缓：最近轮次全文保留、更早的裁剪、token 预算按 bytes/4 估算；

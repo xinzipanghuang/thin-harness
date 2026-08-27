@@ -59,6 +59,10 @@ class Agent:
     request_timeout: float = 300.0
     final_regenerate: bool = True
     experience_enabled: bool = True  # use the experience/evolution module
+    # Opt in when ``finalize()`` preserves the model text byte-for-byte and
+    # only appends a deterministic suffix. This lets the model answer stream
+    # immediately while the suffix is emitted after finalization.
+    stream_before_finalize: bool = False
     workdir: Optional[str] = None
     log_dir: Optional[str] = None
     max_tool_result_chars: int = 8000
@@ -165,7 +169,11 @@ class Agent:
         """Override: react to every tool result (e.g. record facts)."""
 
     async def finalize(self, ctx: ToolContext, text: str, state) -> str:
-        """Override: deterministically validate or format the final output."""
+        """Override: deterministically validate or format the final output.
+
+        Set ``stream_before_finalize = True`` only when the returned value is
+        always ``text`` plus an optional suffix.
+        """
         return text
 
     async def run(

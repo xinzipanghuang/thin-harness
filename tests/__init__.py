@@ -1,0 +1,1 @@
+"""Thin harness tests."""

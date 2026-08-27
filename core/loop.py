@@ -75,7 +75,8 @@ async def run_agent(
     persisted_fact_cursor = 0
     debug_events = state.debug_events
     custom_finalize = type(agent).finalize is not Agent.finalize
-    model_on_token = None if custom_finalize else on_token
+    stream_before_finalize = custom_finalize and agent.stream_before_finalize
+    model_on_token = on_token if not custom_finalize or stream_before_finalize else None
 
     # Codex-style memory: load prior turns, verified facts and reusable
     # experiences ("evolution") into context.
@@ -347,6 +348,7 @@ async def run_agent(
             log.record("final_generation", text=final_text)
         else:
             state.final_text = fallback
+    pre_finalize_text = state.final_text or ""
     try:
         finalized = await agent.finalize(ctx, state.final_text or "", state)
         if finalized is not None:
@@ -359,7 +361,16 @@ async def run_agent(
         )
         log.record("hook_error", hook="finalize", error=f"{type(exc).__name__}: {exc}")
     if custom_finalize and on_token is not None and state.final_text:
-        await on_token(state.final_text)
+        if not stream_before_finalize:
+            await on_token(state.final_text)
+        elif state.final_text.startswith(pre_finalize_text):
+            suffix = state.final_text[len(pre_finalize_text) :]
+            if suffix:
+                await on_token(suffix)
+        else:
+            # The opt-in contract was violated. Do not duplicate a rewritten
+            # answer on the stream; the returned RunResult remains correct.
+            log.record("finalize_stream_mismatch")
     if memory is not None and session_id:
         try:
             memory.save_run(

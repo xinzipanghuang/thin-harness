@@ -411,6 +411,70 @@ alone; `@tool(cacheable=True)` lets exact repeats reuse the previous result.
 Agents can also override behavior hooks: `on_run_start`, `bootstrap` (cheap
 pre-model work, e.g. the FAQ pre-search), and `on_tool_result`.
 
+## Adding a constrained skill
+
+Skills are Python files in trusted packages, like tools, but they are not
+executable plugins. `core.skill` defines immutable Pydantic contracts that
+reject unknown fields. A definition may contain only framework-known tool
+steps, quality gates, value references, and JSON constants—not callables,
+Python source, or shell. Each skill owns explicit Pydantic input and output
+models; see `examples/skill_registry.py` for a complete definition.
+Input and output models must set `ConfigDict(extra="forbid")`, so misspelled
+or undeclared fields cannot silently enter a run.
+
+`discover_skills(...)` imports only explicitly configured trusted packages.
+The registry versions complete contracts by `id + version`, resolves approved
+versions by default, and exposes `SkillDefinition.to_schema()` for discovery.
+Future persistence should store `model_dump()` data, review state, and a hash;
+it must not load Python code from the database. Runtime `validate_input()` and
+`validate_output()` retain the original trusted Pydantic models (including
+custom validators); a schema-only database record is not executable.
+
+## Remote tool server
+
+## Optional external MCP
+
+The client itself does not require MCP. When a central Hub is available,
+`core.mcp_provider.McpToolProvider` can discover its catalog and return ordinary
+`Tool` objects for explicit injection into an Agent. An optional endpoint that
+is offline returns an empty catalog, so local tools keep working. Credentials
+come from environment variables and domain workflow knowledge remains in Hub
+Skills rather than in this generic client.
+
+```python
+from core.mcp_provider import McpEndpoint, McpToolProvider
+
+provider = McpToolProvider(McpEndpoint(
+    endpoint_id="central-hub",
+    url="https://mcp.example.internal/mcp",
+    token_env="CENTRAL_MCP_TOKEN",
+))
+remote_tools = await provider.load_tools()
+```
+
+`tool_server/` is a separate explicit-registration execution boundary. Startup
+code registers every allowed `ServerTool`; it never auto-discovers local tools,
+and requests cannot select modules, executables, environment variables, or an
+arbitrary command line. Executables resolve from the Python server's own
+environment by default, or from an absolute path fixed in trusted tool code.
+
+The only public tool interface is MCP Streamable HTTP at `POST /mcp`; there is
+no parallel custom REST protocol. It defaults to loopback, requires a bearer
+token, and exposes only the tools deliberately registered in server startup
+code. Requests, complete responses, the tool catalog, arguments, concurrency,
+runtime, disk logs, and stream previews all have hard limits. Large results
+must be persisted in the approved data plane and represented by a compact URI
+or artifact id. The formal entry point is `python -m tool_server`; see
+`tool_server/README.md` for deployment options and
+`examples/bio_tool_server.py` for explicit assembly.
+
+The formal server also has a separate durable long-skill layer. Approved,
+explicitly registered `LongSkill` definitions run fixed Tool DAGs through a
+checkpointed executor backed by SQLite. They are currently exposed as stable
+MCP Tools (`skill.<id>.submit` plus `task.get`, `task.result`, `task.cancel`, and
+`task.logs`), keeping the execution core independent from experimental native
+MCP Tasks support.
+
 ## Loop guards (deterministic only)
 
 - `max_steps` / `max_tool_calls` — model and tool budgets;
@@ -449,8 +513,9 @@ terminal chat (bus, worker, rendering, input commands).
 
 ## Deliberate omissions / extension points
 
-- No skills, workflows, DAGs, planner/critic agents, multi-agent
-  orchestration, semantic routing, or embedding-based tool selection.
+- A closed typed Skill contract and registry are present; the workflow
+  executor, remote providers, planner/critic agents, multi-agent orchestration,
+  semantic routing, and embedding-based tool selection remain extension points.
 - Artifacts are in-memory per run (disk persistence is a future extension).
 - Fact extraction is explicit only (`ctx.record_fact`); no automatic critic.
 - History compaction is deferred: recent turns are verbatim, older ones are

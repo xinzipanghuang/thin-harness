@@ -1,24 +1,30 @@
 # Bioinformatics domain
 
-The first specialist example built on thin-harness. It exposes:
+This Agent treats biological data as a file-backed data plane. The model sees
+only compact control-plane metadata: absolute paths, bounded summaries,
+sanitized head/tail fragments, limits, status, and provenance.
 
-- `bio.fasta.inspect` — record count, lengths, GC and ambiguous bases;
-- `bio.fastq.inspect` — read lengths, GC and mean Phred+33 quality;
-- `bio.vcf.inspect` — samples, contigs, filters and variant types;
-- `bio.command.run` — structured local executable invocation without a shell.
+## Safe workflow
 
-Run it in chat:
+1. `bio.file.peep` reads metadata and at most a small decompressed head.
+2. `bio.fasta.inspect`, `bio.fastq.inspect`, and `bio.vcf.inspect` pilot-scan
+   at most 1000 records and 4 MiB by default. JSON reports go to
+   `bio_outputs/inspections/`.
+3. `bio.command.plan` records an allowlisted, placeholder-based pilot command
+   without running the workload (a bounded `--version` probe is allowed).
+4. `bio.command.pilot` runs it for at most 60 seconds with stdout/stderr sent
+   directly to files. Each log is continuously drained and capped at 100 MiB;
+   excess log output is discarded rather than buffered in memory.
+5. `bio.job.submit` accepts a full command only after a successful pilot with
+   unchanged input paths, sizes, and mtimes. It returns immediately.
+6. `bio.job.status` and `bio.job.tail` expose compact state and bounded logs;
+   `bio.job.cancel` requires the exact job id twice.
 
-```bash
-python -m chat --agent bioinformatics --session bio-work
-```
+All command outputs live under `bio_outputs/jobs/<job_id>/`. Existing outputs
+are never overwritten. Input arguments use `{input0}`, `{input1}`, etc.; full
+output paths use `{output_dir}`.
 
-Or inspect one file directly:
-
-```bash
-python examples/bioinformatics_run.py data/sample.vcf
-```
-
-Format summaries are measurements, not biological conclusions. The Agent's
-domain prompt preserves that distinction and its `finalize` hook appends a
-deterministic provenance section.
+The executable allowlist currently includes common tools such as samtools,
+bcftools, bedtools, seqkit, fastp, minimap2, bwa, bowtie2, STAR, salmon,
+kallisto, GATK, FastQC, and MultiQC. Extending the allowlist is a code review,
+not a model decision.

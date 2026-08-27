@@ -1,5 +1,7 @@
 # Runtime dependencies (Python >= 3.10)
 openai>=2.0          # model transport for every endpoint (OpenAI-compatible)
+pydantic>=2.11       # closed, typed Tool/Skill protocol contracts
+mcp>=1.29,<2         # sole remote Tool transport: MCP Streamable HTTP
 peewee>=4.0          # SQLite ORM for memory (Session/Turn/Fact/Artifact)
 rich>=13.0           # terminal chat rendering
 pypdf>=4.0           # PDF document reading (documents.read)

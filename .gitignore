@@ -6,5 +6,7 @@ logs/
 data/
 external/
 rag_agent/
+server_runs/
 test/
 tests/
+.DS_Store

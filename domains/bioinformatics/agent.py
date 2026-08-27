@@ -19,9 +19,6 @@ class BioinformaticsAgent(Agent):
     tool_packages = ["tools", "domains.bioinformatics.tools"]
     tool_include = [
         "filesystem.list",
-        "filesystem.find",
-        "filesystem.read",
-        "artifacts.read",
         "bio.*",
     ]
     max_steps = 12
@@ -29,6 +26,7 @@ class BioinformaticsAgent(Agent):
     tool_timeout = 120
     max_consecutive_failures = 3
     experience_enabled = False
+    stream_before_finalize = True
 
     async def finalize(self, ctx: ToolContext, text: str, state: RunState) -> str:
         """Append a compact deterministic provenance record to analytical output."""
@@ -44,7 +42,7 @@ class BioinformaticsAgent(Agent):
             records.append(evidence.provenance)
         if not records:
             return text
-        lines = ["", "### Provenance"]
+        lines = ["### Provenance"]
         for record in records:
             label = str(
                 record.get("command")
@@ -56,4 +54,5 @@ class BioinformaticsAgent(Agent):
             if version:
                 label += f" (version {version})"
             lines.append(f"- {label}")
-        return text.rstrip() + "\n" + "\n".join(lines)
+        separator = "\n" if text.endswith("\n") else "\n\n"
+        return text + separator + "\n".join(lines)
