@@ -27,10 +27,11 @@ class CompatibilityProvider(FakeProvider):
 
 
 class WESAgentTests(unittest.IsolatedAsyncioTestCase):
-    async def test_prompt_supports_direct_general_and_generic_wes_answers(self):
+    async def test_prompt_supports_wes_knowledge_usage_and_scope_boundaries(self):
         agent = WESAgent(model=EchoModel())
-        self.assertIn("answer directly from your own knowledge", agent.system_prompt)
+        self.assertIn("questions about using this product", agent.system_prompt)
         self.assertIn("Do not refuse a generic WES question", agent.system_prompt)
+        self.assertIn("requests unrelated to WES", agent.system_prompt)
         self.assertIn("Lead every user-facing answer with the direct conclusion", agent.system_prompt)
 
     async def test_dynamic_mcp_tool_is_available_to_first_model_call(self):
