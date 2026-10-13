@@ -183,6 +183,18 @@ python examples/faq_run.py "What is the refund policy?" --documents ./docs
 python examples/bioinformatics_run.py ./data/sample.vcf
 ```
 
+WES Center integration test:
+
+```bash
+export WES_MCP_URL=http://127.0.0.1:9090/mcp
+python -m chat --agent wes --debug 1 --markdown
+```
+
+The `wes` Agent discovers the center catalog over MCP Streamable HTTP before
+the first turn. Without a token it accepts only `127.0.0.1`, `localhost`, or
+`::1`; a remote center requires a `WES_MCP_TOKEN` of at least 32 bytes. It never
+connects to Wuhan, Shenzhen, or regional analysis paths directly.
+
 ## Agents
 
 An agent is a Python subclass of `core.agent.Agent` — not a YAML file. It only

@@ -1,6 +1,8 @@
+import os
 import unittest
+from unittest.mock import patch
 
-from core.mcp_provider import DiscoveredMcpTool, McpEndpoint, McpToolProvider
+from core.mcp_provider import DiscoveredMcpTool, McpEndpoint, McpToolProvider, StreamableHttpTransport
 from core.artifacts import ArtifactStore
 from core.tool import ToolContext, execute_tool
 from core.types import ToolCall
@@ -32,6 +34,26 @@ def endpoint():
 
 
 class McpProviderTests(unittest.IsolatedAsyncioTestCase):
+    def test_unauthenticated_transport_is_loopback_only(self):
+        local = StreamableHttpTransport(McpEndpoint(
+            "local", "http://127.0.0.1:9090/mcp",
+            allow_unauthenticated_loopback=True,
+        ))
+        self.assertEqual(local._headers(), {})
+        remote = StreamableHttpTransport(McpEndpoint(
+            "remote", "http://wes.example.internal/mcp",
+            allow_unauthenticated_loopback=True,
+        ))
+        with self.assertRaisesRegex(ValueError, "missing or weak"):
+            remote._headers()
+
+    def test_strong_token_is_sent(self):
+        transport = StreamableHttpTransport(McpEndpoint(
+            "remote", "https://wes.example.internal/mcp", "WES_TEST_TOKEN"
+        ))
+        with patch.dict(os.environ, {"WES_TEST_TOKEN": "x" * 32}):
+            self.assertEqual(transport._headers(), {"Authorization": f"Bearer {'x' * 32}"})
+
     async def test_discovers_and_calls_remote_tool(self):
         provider = McpToolProvider(endpoint(), transport=FakeTransport())
         tools = await provider.load_tools()

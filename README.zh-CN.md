@@ -176,6 +176,17 @@ python examples/faq_run.py "退款政策是什么？" --documents ./docs
 python examples/bioinformatics_run.py ./data/sample.vcf
 ```
 
+WES 中心联调：
+
+```bash
+export WES_MCP_URL=http://127.0.0.1:9090/mcp
+python -m chat --agent wes --debug 1 --markdown
+```
+
+`wes` Agent 在首次对话前通过 MCP Streamable HTTP 发现中心工具。未配置 Token
+时只允许连接 `127.0.0.1`、`localhost` 或 `::1`；远程中心需要至少 32 字节的
+`WES_MCP_TOKEN`。它不会直接连接武汉、深圳或读取地区目录。
+
 ## Agent
 
 Agent 是 `core.agent.Agent` 的 Python 子类——不是 YAML 文件。它只定义领域：

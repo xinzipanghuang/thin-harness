@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, AsyncIterator, Protocol
+from urllib.parse import urlparse
 
 import httpx
 from mcp import ClientSession
@@ -22,9 +23,10 @@ from .types import ToolResult
 class McpEndpoint:
     endpoint_id: str
     url: str
-    token_env: str
+    token_env: str = ""
     connect_timeout_seconds: float = 5.0
     call_timeout_seconds: float = 60.0
+    allow_unauthenticated_loopback: bool = False
 
 
 @dataclass(frozen=True)
@@ -43,11 +45,15 @@ class StreamableHttpTransport:
     def __init__(self, endpoint: McpEndpoint) -> None:
         self.endpoint = endpoint
 
-    def _token(self) -> str:
-        token = os.environ.get(self.endpoint.token_env, "")
-        if len(token.encode("utf-8")) < 32:
-            raise ValueError(f"missing or weak MCP credential: {self.endpoint.token_env}")
-        return token
+    def _headers(self) -> dict[str, str]:
+        token = os.environ.get(self.endpoint.token_env, "") if self.endpoint.token_env else ""
+        if len(token.encode("utf-8")) >= 32:
+            return {"Authorization": f"Bearer {token}"}
+        host = (urlparse(self.endpoint.url).hostname or "").lower()
+        if self.endpoint.allow_unauthenticated_loopback and host in {"127.0.0.1", "localhost", "::1"} and not token:
+            return {}
+        name = self.endpoint.token_env or "MCP token"
+        raise ValueError(f"missing or weak MCP credential: {name}")
 
     @asynccontextmanager
     async def _session(self) -> AsyncIterator[ClientSession]:
@@ -55,7 +61,7 @@ class StreamableHttpTransport:
             self.endpoint.call_timeout_seconds,
             connect=self.endpoint.connect_timeout_seconds,
         )
-        headers = {"Authorization": f"Bearer {self._token()}"}
+        headers = self._headers()
         async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
             async with streamable_http_client(
                 self.endpoint.url, http_client=client, terminate_on_close=True
