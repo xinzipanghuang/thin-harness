@@ -25,6 +25,7 @@ class Message:
     content: str
     tool_call_id: Optional[str] = None
     tool_calls: Optional[list[dict]] = None  # assistant messages: OpenAI-style tool_calls
+    reasoning_content: Optional[str] = None  # preserved for thinking-mode tool rounds
 
 
 @dataclass

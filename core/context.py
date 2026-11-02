@@ -202,7 +202,9 @@ class ContextBuilder:
             Message(role="user", content=body),
         ]
 
-    def assistant_tool_calls_message(self, calls: list[ToolCall]) -> Message:
+    def assistant_tool_calls_message(
+        self, calls: list[ToolCall], *, content: str = "", reasoning_content: Optional[str] = None
+    ) -> Message:
         """Assistant message echoing the model's tool calls (OpenAI format)."""
         tool_calls = [
             {
@@ -217,7 +219,10 @@ class ContextBuilder:
             }
             for index, call in enumerate(calls)
         ]
-        return Message(role="assistant", content="", tool_calls=tool_calls)
+        return Message(
+            role="assistant", content=content, tool_calls=tool_calls,
+            reasoning_content=reasoning_content,
+        )
 
     def tool_result_message(self, call: ToolCall, obs: Observation) -> Message:
         """One tool message per executed call, tied to the assistant call id."""

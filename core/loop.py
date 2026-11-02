@@ -285,7 +285,9 @@ async def run_agent(
                         call.id = f"call_{state.steps}_{index}"
                 # Echo the model's calls (wire names) back into history before
                 # mapping them to registry names for execution.
-                messages.append(builder.assistant_tool_calls_message(raw_calls))
+                messages.append(builder.assistant_tool_calls_message(
+                    raw_calls, content=response.text or "", reasoning_content=response.thinking
+                ))
                 calls = [
                     ToolCall(
                         name=reverse_names.get(call.name, call.name),

@@ -86,6 +86,8 @@ def _messages_payload(messages: list[Message]) -> list[dict[str, Any]]:
             item["tool_call_id"] = message.tool_call_id
         if message.tool_calls:
             item["tool_calls"] = message.tool_calls
+        if message.reasoning_content is not None:
+            item["reasoning_content"] = message.reasoning_content
         payload.append(item)
     return payload
 
