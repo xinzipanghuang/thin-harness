@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import uuid
+from typing import Callable
 
 
 class ArtifactStore:
     """Stores full tool outputs by artifact id.
 
-    v1 keeps artifacts in memory for the duration of a run. Disk persistence
-    is a deliberate future extension point.
+    A caller can supply a scoped lookup for artifacts from previous runs.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, load: Callable[[str], str | None] | None = None) -> None:
         self._content: dict[str, str] = {}
+        self._load = load
 
     def put(self, content: str, tool: str, summary: str) -> str:
         artifact_id = "artifact_" + uuid.uuid4().hex[:8]
@@ -23,7 +24,9 @@ class ArtifactStore:
         return artifact_id
 
     def get(self, artifact_id: str) -> str | None:
-        return self._content.get(artifact_id)
+        if artifact_id in self._content:
+            return self._content[artifact_id]
+        return self._load(artifact_id) if self._load else None
 
     def size(self, artifact_id: str) -> int:
         content = self._content.get(artifact_id)

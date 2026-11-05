@@ -6,7 +6,7 @@ import json
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional, Sequence
 
 
 def utcnow() -> str:
@@ -26,6 +26,12 @@ class Message:
     tool_call_id: Optional[str] = None
     tool_calls: Optional[list[dict]] = None  # assistant messages: OpenAI-style tool_calls
     reasoning_content: Optional[str] = None  # preserved for thinking-mode tool rounds
+    is_request: bool = False  # internal marker for the current user input
+
+
+ConversationHistory = Sequence[Message | tuple[str, str] | tuple[int, str, str]]
+PrepareContext = Callable[[list[Message], list[dict]], Awaitable[list[Message]]]
+ToolBatchCallback = Callable[[list[Message]], None]
 
 
 @dataclass
@@ -52,6 +58,9 @@ class ToolResult:
     cached: bool = False  # result reused from an identical earlier call (no new evidence)
     preview: Optional[str] = None
     provenance: dict[str, Any] = field(default_factory=dict)
+
+
+ToolExecutionCallback = Callable[[int, ToolCall, ToolResult], None]
 
 
 @dataclass
@@ -89,6 +98,8 @@ class Evidence:
     preview: str = ""
     source: str = ""
     provenance: dict[str, Any] = field(default_factory=dict)
+    truncated: bool = False
+    artifact_id: Optional[str] = None
 
 
 @dataclass
@@ -157,6 +168,7 @@ class ModelResponse:
     usage: Optional[dict[str, Any]] = None
     thinking: Optional[str] = None  # reasoning content, when the provider exposes it
     metrics: Optional[dict[str, Any]] = None  # transport timings, e.g. ttft_ms
+    finish_reason: Optional[str] = None
 
     @property
     def is_final(self) -> bool:
@@ -198,8 +210,8 @@ class ContextConfig:
     stop_hint_min_successes: int = 3
     stop_hint_stagnant_rounds: int = 2
     token_budget_tokens: int = 0  # 0 = disabled; when exceeded, force a stop hint
-    history_recent_turns: int = 3  # most recent turns shown verbatim in context
-    history_summary_turns: int = 12  # earlier turns compressed to one line each
+    history_recent_turns: int = 3  # legacy turn pairs replayed verbatim
+    history_summary_turns: int = 12  # additional legacy turns loaded with clipped content
     experience_stale_days: int = 7  # time-sensitive experiences older than this are not injected
     max_facts: int = 15  # cap on VERIFIED FACTS injected (newest first)
     max_evidence_items: int = 24  # cap on numbered evidence items for the final answer

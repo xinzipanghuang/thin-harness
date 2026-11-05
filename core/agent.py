@@ -18,11 +18,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
+from .artifacts import ArtifactStore
 from .context import ContextConfig, environment_info
 from .model import Model
 from .providers import resolve
 from .tool import Tool, ToolContext, select_tools
-from .types import Observation, RuntimeConfig, RunResult, ToolCall, ToolResult
+from .types import (
+    ConversationHistory, Observation, PrepareContext, RuntimeConfig, RunResult,
+    ToolBatchCallback, ToolCall, ToolExecutionCallback, ToolResult,
+)
 
 BootstrapHook = Callable[[ToolContext], Awaitable[list[Observation]]]
 
@@ -179,11 +183,15 @@ class Agent:
     async def run(
         self,
         request: str,
-        history: Optional[list[tuple[str, str]]] = None,
+        history: Optional[ConversationHistory] = None,
         on_token=None,
         on_debug=None,
         memory=None,
         session_id: str = "",
+        prepare_context: Optional[PrepareContext] = None,
+        artifact_store: Optional[ArtifactStore] = None,
+        on_tool_batch: Optional[ToolBatchCallback] = None,
+        on_tool_execution: Optional[ToolExecutionCallback] = None,
     ) -> RunResult:
         from .loop import run_agent
 
@@ -195,4 +203,8 @@ class Agent:
             on_debug=on_debug,
             memory=memory if memory is not None else self.memory,
             session_id=session_id or self.session_id,
+            prepare_context=prepare_context,
+            artifact_store=artifact_store,
+            on_tool_batch=on_tool_batch,
+            on_tool_execution=on_tool_execution,
         )

@@ -18,14 +18,18 @@ from .context import ContextBuilder
 from .tool import Tool, ToolContext, execute_tool, serialize_output, wire_name
 from .types import (
     Artifact,
+    ConversationHistory,
     DebugEvent,
     Evidence,
     Fact,
     Message,
     Observation,
+    PrepareContext,
     RunResult,
     RunState,
+    ToolBatchCallback,
     ToolCall,
+    ToolExecutionCallback,
     ToolResult,
     new_run_id,
     utcnow,
@@ -47,11 +51,15 @@ class RunLog:
 async def run_agent(
     agent: Agent,
     request: str,
-    history: Optional[list[tuple[str, str]]] = None,
+    history: Optional[ConversationHistory] = None,
     on_token: Optional[Callable[[str], Awaitable[None]]] = None,
     on_debug: Optional[Callable[[int, str, dict], Awaitable[None]]] = None,
     memory=None,
     session_id: str = "",
+    prepare_context: Optional[PrepareContext] = None,
+    artifact_store: Optional[ArtifactStore] = None,
+    on_tool_batch: Optional[ToolBatchCallback] = None,
+    on_tool_execution: Optional[ToolExecutionCallback] = None,
 ) -> RunResult:
     """Run the loop until the model answers or a deterministic guard fires."""
     run_id = new_run_id()
@@ -60,7 +68,7 @@ async def run_agent(
     run_started = time.perf_counter()
     agent.last_run_at = datetime.now().astimezone()
 
-    store = ArtifactStore()
+    store = artifact_store if artifact_store is not None else ArtifactStore()
     ctx = ToolContext(
         artifact_store=store,
         workdir=agent.runtime.workdir,
@@ -68,6 +76,7 @@ async def run_agent(
         memory=memory,
         session_id=session_id,
         environment=agent.environment,
+        max_tool_result_chars=agent.context.max_tool_result_chars,
     )
     state = RunState(request=request)
     ctx.facts = state.facts
@@ -92,7 +101,6 @@ async def run_agent(
                         agent.context.history_recent_turns
                         + agent.context.history_summary_turns
                     ),
-                    numbered=True,
                 )
             for fact in memory.load_facts(session_id, limit=agent.context.max_facts):
                 state.facts.append(
@@ -145,9 +153,19 @@ async def run_agent(
     # they are mapped back to registry names before execution.
     tool_wire_names = {tool.name: wire_name(tool.name) for tool in agent.tools}
     reverse_names = {wire: original for original, wire in tool_wire_names.items()}
-    model_tools = [
-        {**tool.to_schema(), "name": tool_wire_names[tool.name]} for tool in agent.tools
-    ]
+    model_tools = []
+    for tool in agent.tools:
+        schema = tool.to_schema()
+        model_tools.append({
+            **schema,
+            "name": tool_wire_names[tool.name],
+            "description": (
+                f"{schema.get('description', '')}\n\n"
+                "Check the tool result's [truncated=true/false] marker for the requested scope. "
+                "Truncated output is partial. "
+                "Use the artifact reference, pagination, or a narrower query when details are missing."
+            ),
+        })
     builder = ContextBuilder(
         agent.system_prompt,
         agent.context,
@@ -169,15 +187,13 @@ async def run_agent(
                 obs.step = 0
                 state.observations.append(obs)
             if observations:
-                messages.append(builder.bootstrap_message(observations))
+                messages[0].content += "\n\n" + builder.bootstrap_context(observations)
             log.record("bootstrap", observations=len(state.observations), facts=len(state.facts))
             await debug(1, "bootstrap", observations=len(state.observations), facts=len(state.facts))
         except Exception as exc:
             state.harness_notices.append(f"Bootstrap hook failed: {type(exc).__name__}: {exc}")
-            messages.append(
-                builder.notice_message(
-                    f"Bootstrap hook failed: {type(exc).__name__}: {exc}"
-                )
+            messages[0].content += (
+                f"\n\nHARNESS NOTICE\nBootstrap hook failed: {type(exc).__name__}: {exc}"
             )
             log.record("bootstrap_error", error=str(exc))
 
@@ -206,7 +222,8 @@ async def run_agent(
                 if not state.stop_hint_sent and builder.stop_hint_due(state):
                     messages.append(builder.stop_hint_message())
                     state.stop_hint_sent = True
-                estimated = builder.estimate_tokens(messages)
+                request_messages = await prepare_context(messages, model_tools) if prepare_context else messages
+                estimated = builder.estimate_tokens(request_messages, model_tools)
                 state.last_estimated_tokens = estimated
                 budget = agent.context.token_budget_tokens
                 await debug(
@@ -216,7 +233,10 @@ async def run_agent(
                     budget=budget or None,
                 )
                 if budget and estimated >= budget and not state.stop_hint_sent:
-                    messages.append(builder.stop_hint_message())
+                    hint = builder.stop_hint_message()
+                    messages.append(hint)
+                    if request_messages is not messages:
+                        request_messages.append(hint)
                     state.stop_hint_sent = True
                 await debug(
                     2,
@@ -228,7 +248,7 @@ async def run_agent(
                             "tool_calls": len(message.tool_calls or []),
                             "content": message.content,
                         }
-                        for message in messages
+                        for message in request_messages
                     ],
                 )
                 await debug(
@@ -241,7 +261,7 @@ async def run_agent(
                 try:
                     response = await asyncio.wait_for(
                         agent.model.respond(
-                            list(messages), model_tools, on_token=model_on_token
+                            list(request_messages), model_tools, on_token=model_on_token
                         ),
                         timeout=agent.runtime.model_timeout,
                     )
@@ -285,9 +305,10 @@ async def run_agent(
                         call.id = f"call_{state.steps}_{index}"
                 # Echo the model's calls (wire names) back into history before
                 # mapping them to registry names for execution.
-                messages.append(builder.assistant_tool_calls_message(
+                assistant_call = builder.assistant_tool_calls_message(
                     raw_calls, content=response.text or "", reasoning_content=response.thinking
-                ))
+                )
+                messages.append(assistant_call)
                 calls = [
                     ToolCall(
                         name=reverse_names.get(call.name, call.name),
@@ -300,9 +321,11 @@ async def run_agent(
                 artifacts_before = len(state.artifacts)
                 facts_before = len(state.facts)
                 evidence_before = len(state.evidence)
-                recorded = await _execute_calls(agent, ctx, state, calls, log, debug)
-                for call, obs in zip(calls, recorded):
-                    messages.append(builder.tool_result_message(call, obs))
+                recorded = await _execute_calls(agent, ctx, state, calls, log, debug, on_tool_execution)
+                results = [builder.tool_result_message(call, obs) for call, obs in zip(calls, recorded)]
+                messages.extend(results)
+                if on_tool_batch:
+                    on_tool_batch([assistant_call, *results])
                 if len(state.facts) > fact_cursor:
                     messages.append(builder.facts_message(state.facts[fact_cursor:]))
                     fact_cursor = len(state.facts)
@@ -343,7 +366,7 @@ async def run_agent(
     ):
         fallback = state.final_text or ""
         final_text = await _final_generation(
-            agent, state, request, history, model_on_token, log, debug
+            agent, builder, state, history, model_on_token, debug, prepare_context
         )
         if final_text:
             state.final_text = final_text
@@ -423,20 +446,26 @@ async def _execute_calls(
     calls: list[ToolCall],
     log: RunLog,
     debug,
+    on_tool_execution: Optional[ToolExecutionCallback] = None,
 ) -> list[Observation]:
     by_name = {tool.name: tool for tool in agent.tools}
     any_serial = any(call.name in by_name and by_name[call.name].serial for call in calls)
     batch_seen: set = set()
     recorded: list[Observation] = []
+
+    async def execute(call: ToolCall) -> ToolResult:
+        result = await _run_one(agent, ctx, state, call, log, by_name, debug, batch_seen)
+        if on_tool_execution:
+            on_tool_execution(state.steps, call, result)
+        return result
+
     if any_serial:
         for call in calls:
-            result = await _run_one(agent, ctx, state, call, log, by_name, debug, batch_seen)
+            result = await execute(call)
             recorded.append(_record_result(agent, ctx, state, call, result))
             await _tool_result_hook(agent, ctx, call, result, log)
     else:
-        results = await asyncio.gather(
-            *(_run_one(agent, ctx, state, call, log, by_name, debug, batch_seen) for call in calls)
-        )
+        results = await asyncio.gather(*(execute(call) for call in calls))
         for call, result in zip(calls, results):
             recorded.append(_record_result(agent, ctx, state, call, result))
             await _tool_result_hook(agent, ctx, call, result, log)
@@ -644,6 +673,8 @@ def _record_result(
                         or ""
                     ),
                     provenance=dict(result.provenance),
+                    truncated=observation.truncated or len(preview or "") > len(preview_text),
+                    artifact_id=observation.artifact_id,
                 )
             )
     if result.artifact_id:
@@ -710,12 +741,12 @@ def _call_key(
 
 async def _final_generation(
     agent: Agent,
+    builder: ContextBuilder,
     state: RunState,
-    request: str,
-    history: Optional[list[tuple[str, str]]],
+    history: Optional[ConversationHistory],
     on_token,
-    log: RunLog,
     debug,
+    prepare_context: Optional[PrepareContext] = None,
 ) -> str:
     """One tool-free model call over a compact evidence summary.
 
@@ -724,21 +755,14 @@ async def _final_generation(
     a knowledge-base assistant). Returns "" if it fails, so callers fall back
     to the existing answer/guard message.
     """
-    now_line = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-    sections = [f"CURRENT TIME\n{now_line}", f"CURRENT USER REQUEST\n{request}"]
-    if history:
-        builder = ContextBuilder(agent.system_prompt, agent.context)
-        for header, body in builder.history_sections(history):
-            sections.append(f"{header}\n{body}")
-    if state.facts:
-        sections.append(
-            "VERIFIED FACTS\n"
-            + "\n".join(f"[{fact.id}] {fact.value}" for fact in state.facts)
-        )
+    sections = []
     if state.evidence:
         lines = []
         for item in state.evidence:
             lines.append(f"[{item.index}] ({item.tool}) {item.summary}")
+            lines.append(f"    [truncated={'true' if item.truncated else 'false'}]")
+            if item.artifact_id:
+                lines.append(f"    [saved as artifact {item.artifact_id}]")
             if item.preview and item.preview != item.summary:
                 lines.append("    " + item.preview)
             if item.source:
@@ -749,10 +773,10 @@ async def _final_generation(
                     + json.dumps(item.provenance, ensure_ascii=False, default=str)
                 )
         sections.append("AUTHORIZED EVIDENCE\n" + "\n".join(lines))
-    body = (
-        "\n\n".join(sections)
-        + "\n\nAnswer the user's request directly and concisely. Do not call tools. "
+    sections.append(
+        "Answer the user's request directly and concisely. Do not call tools. "
         "Treat only successful tool output and VERIFIED FACTS as confirmed evidence. "
+        "A truncated result cannot establish that omitted records are absent. "
         "A conclusion derived from evidence is an inference and must be worded as one. "
         "Failed, blocked, or cached calls add no new evidence, and missing information "
         "must remain unknown rather than being guessed. Do not narrate the internal tool "
@@ -761,10 +785,8 @@ async def _final_generation(
         "about specific local or external content, say what cannot be confirmed when the "
         "evidence is insufficient."
     )
-    messages = [
-        Message(role="system", content=agent.system_prompt),
-        Message(role="user", content=body),
-    ]
+    messages = builder.build_initial(state, history=history)
+    messages.append(Message(role="user", content="\n\n".join(sections)))
     final_started = time.perf_counter()
     await debug(
         1,
@@ -774,6 +796,8 @@ async def _final_generation(
         phase="final",
     )
     try:
+        if prepare_context:
+            messages = await prepare_context(messages, [])
         response = await asyncio.wait_for(
             agent.model.respond(messages, [], on_token=on_token),
             timeout=agent.runtime.model_timeout,

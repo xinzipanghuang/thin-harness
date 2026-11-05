@@ -10,7 +10,7 @@ from openai import AsyncOpenAI
 from core.agent import Agent
 from core.model import OpenAIModel
 from core.tool import Tool
-from core.types import RuntimeConfig, ToolResult
+from core.types import Message, RuntimeConfig, ToolResult
 
 
 async def sample_overview(sample_id: str):
@@ -18,7 +18,8 @@ async def sample_overview(sample_id: str):
 
 
 class BailianModelTests(unittest.IsolatedAsyncioTestCase):
-    async def check_tool_round(self, *, streaming: bool, thinking: bool):
+    async def check_tool_round(self, *, streaming: bool, thinking: bool, regenerate: bool = False,
+                               source_truncated: bool = False):
         requests = []
         reasoning = "Need the sample evidence." if thinking else None
 
@@ -76,13 +77,29 @@ class BailianModelTests(unittest.IsolatedAsyncioTestCase):
         async def on_token(text):
             tokens.append(text)
 
+        history = [
+            Message(role="assistant", content="Earlier status from before the window."),
+            Message(role="user", content="Check Wuhan.\n\nUse the latest run."),
+            Message(role="assistant", content="Previous evidence:\n" + "x" * 120),
+            Message(role="user", content="I meant sample S1."),
+        ]
         try:
             with tempfile.TemporaryDirectory() as workdir:
-                agent = Agent(model=model, tools=[Tool(name="sample_overview", fn=sample_overview)],
+                async def lookup(sample_id: str):
+                    result = await sample_overview(sample_id)
+                    if source_truncated:
+                        result.data["truncated"] = True
+                    return result
+
+                agent = Agent(model=model, tools=[Tool(name="sample_overview", fn=lookup)],
                               system_prompt="Query sample evidence.", runtime=RuntimeConfig(
-                                  experience_enabled=False, final_regenerate=False,
+                                  experience_enabled=False, final_regenerate=regenerate,
+                                  max_steps=1 if regenerate else 8,
                                   workdir=workdir, log_dir=workdir))
-                result = await agent.run("Query sample S1", on_token=on_token if streaming else None)
+                result = await agent.run(
+                    "Query sample S1", history=history,
+                    on_token=on_token if streaming else None,
+                )
         finally:
             await model._client.close()
 
@@ -93,9 +110,23 @@ class BailianModelTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(body["model"], "deepseek-v4.1-flash-1017")
             self.assertEqual(body["enable_thinking"], thinking)
             self.assertEqual(body.get("stream", False), streaming)
-        assistant = next(m for m in requests[1]["messages"] if m["role"] == "assistant")
+            self.assertEqual(body["messages"][0]["role"], "system")
+            self.assertIn("CURRENT TIME", body["messages"][0]["content"])
+            self.assertEqual(body["messages"][1:6], [
+                {"role": message.role, "content": message.content} for message in history
+            ] + [{"role": "user", "content": "Query sample S1"}])
+        self.assertIn("[truncated=true/false]", requests[0]["tools"][0]["function"]["description"])
+        if regenerate:
+            self.assertNotIn("tools", requests[1])
+            self.assertIn("AUTHORIZED EVIDENCE", requests[1]["messages"][6]["content"])
+            self.assertIn("[truncated=false]", requests[1]["messages"][6]["content"])
+            return
+        self.assertEqual(requests[1]["messages"][:6], requests[0]["messages"])
+        assistant = requests[1]["messages"][6]
+        self.assertEqual(assistant["role"], "assistant")
         self.assertEqual(assistant.get("reasoning_content"), reasoning)
         tool = next(m for m in requests[1]["messages"] if m["role"] == "tool")
+        self.assertIn(f"[truncated={'true' if source_truncated else 'false'}]", tool["content"])
         self.assertEqual(tool["tool_call_id"], assistant["tool_calls"][0]["id"])
         if not thinking:
             self.assertNotIn("reasoning_content", assistant)
@@ -111,3 +142,9 @@ class BailianModelTests(unittest.IsolatedAsyncioTestCase):
         for thinking in (False, True):
             with self.subTest(thinking=thinking):
                 await self.check_tool_round(streaming=False, thinking=thinking)
+
+    async def test_final_generation_preserves_role_history(self):
+        await self.check_tool_round(streaming=False, thinking=False, regenerate=True)
+
+    async def test_tool_reported_truncation_is_visible_without_harness_clipping(self):
+        await self.check_tool_round(streaming=False, thinking=False, source_truncated=True)

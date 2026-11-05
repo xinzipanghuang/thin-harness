@@ -38,6 +38,7 @@ class ToolContext:
     session_id: str = ""  # current chat session id, when memory-backed
     environment: dict[str, Any] = field(default_factory=dict)  # OS/terminal/shell/cwd
     _current_tool: str = ""
+    max_tool_result_chars: int = 8000
 
     def record_fact(self, value: Any, source: Optional[str] = None) -> Fact:
         """Explicitly preserve a verified fact for later context builds."""
@@ -391,15 +392,19 @@ def _bind_arguments(tool_obj: Tool, ctx: ToolContext, arguments: dict[str, Any])
 def _persist_large_output(
     result: ToolResult, store: ArtifactStore, tool_name: str, max_chars: int
 ) -> ToolResult:
-    if result.data is None or result.artifact_id is not None:
+    if isinstance(result.data, dict) and result.data.get("truncated") is True:
+        result.truncated = True
+    if result.preview is not None and len(result.preview) > max_chars:
+        result.truncated = True
+    if result.artifact_id is not None:
         return result
-    text = serialize_output(result.data)
-    if len(text) > max_chars:
+    text = serialize_output(result.data) if result.data is not None else (result.preview or "")
+    preview = result.preview
+    if len(text) > max_chars or (preview is not None and len(preview) < len(text)):
         result.truncated = True
         result.artifact_id = store.put(text, tool=tool_name, summary=result.summary)
-        result.preview = text[:max_chars]
-    elif result.preview is None and text:
-        result.preview = text[:max_chars]
+    if preview is not None or text:
+        result.preview = (text if preview is None else preview)[:max_chars]
     return result
 
 

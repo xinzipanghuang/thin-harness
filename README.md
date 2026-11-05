@@ -374,19 +374,17 @@ section (OS + release/arch, Python version, detected terminal, shell, user,
 and cwd), mirrored on the agent as `agent.environment` and in `ToolContext`,
 so the model and tools can adapt to the platform without probing.
 
-The loop loads prior turns and facts into context at run start — the most
-recent `history_recent_turns` (default 3) verbatim, earlier turns compressed
-to a one-line summary (`CONVERSATION SUMMARY`) — injects matched experiences
-as `RELEVANT EXPERIENCE`, and saves the run at the end. After a completed run
+The loop replays prior turns in order as individual `user` and `assistant`
+messages, followed by the new user request. For stored turn pairs, the most
+recent `history_recent_turns` (default 3) are replayed verbatim and earlier
+messages are clipped. Runtime context, verified facts, and matched experiences
+are provided in the system message. After a completed run
 that used tools, the model distills the run into one JSON experience
 (`daily.forget` deletes incorrect records; `daily.experiences` lists them).
 Restart `python -m chat` with the same `--session` and it remembers the
 conversation.
 
-Recency is explicit: history turns are labeled with their global session
-number, the recent block ends by marking the latest turn, and `CURRENT USER
-REQUEST` is always the last section; `VERIFIED FACTS` is capped at
-`max_facts` (default 15) so stale topics cannot crowd out the recent thread.
+`VERIFIED FACTS` is capped at `max_facts` (default 15).
 
 Debug records stay trustworthy: `Turn.seq` is migrated to `AUTOINCREMENT` (so
 cleared sessions never recycle turn numbers), and on startup `Memory` prunes
@@ -501,7 +499,7 @@ MCP Tasks support.
   deterministic guard stops the loop before the model answers; normally
   completed answers are returned directly;
 - `token_budget_tokens` (ContextConfig) — when set, exceeding the estimated
-  budget (bytes/4) injects a stop hint; per-call timings include TTFT
+  token budget injects a stop hint; per-call timings include TTFT
   (`connect_ms` / `ttft_ms` in debug).
 
 No scoring systems, reflection calls, planners, or intent classifiers.

@@ -50,14 +50,6 @@ class ScriptedModel:
         return ModelResponse(text="(script exhausted)")
 
 
-def _extract_request(body: str) -> str:
-    marker = "CURRENT USER REQUEST\n"
-    if marker in body:
-        rest = body.split(marker, 1)[1]
-        return rest.split("\n\n", 1)[0].strip()
-    return str(body or "").strip()
-
-
 class EchoModel:
     """Offline demo model: echoes the current user request, never calls tools."""
 
@@ -67,15 +59,10 @@ class EchoModel:
         tools: list[dict],
         on_token=None,
     ) -> ModelResponse:
-        for message in messages:
-            if message.role == "user" and "CURRENT USER REQUEST" in message.content:
-                request = _extract_request(message.content)
-                return ModelResponse(text=f"[echo] {request or '(no request)'}")
-        for message in reversed(messages):
-            if message.role == "user":
-                request = _extract_request(message.content)
-                return ModelResponse(text=f"[echo] {request or '(no request)'}")
-        return ModelResponse(text="[echo] (no request)")
+        users = [message for message in reversed(messages) if message.role == "user"]
+        current = next((message for message in users if message.is_request), None)
+        request = current.content if current else (users[0].content if users else "")
+        return ModelResponse(text=f"[echo] {request.strip() or '(no request)'}")
 
 
 def _messages_payload(messages: list[Message]) -> list[dict[str, Any]]:
@@ -133,6 +120,7 @@ def _parse_chat_completion(response: Any) -> ModelResponse:
         tool_calls=calls,
         usage=_usage_dict(getattr(response, "usage", None)),
         thinking=thinking if choices else None,
+        finish_reason=getattr(choices[0], "finish_reason", None) if choices else None,
     )
 
 
@@ -175,6 +163,9 @@ class OpenAIModel:
             base_url=base_url,
             timeout=timeout,
         )
+
+    async def aclose(self) -> None:
+        await self._client.close()
 
     async def respond(
         self,
@@ -221,12 +212,14 @@ class OpenAIModel:
         thinking_parts: list[str] = []
         calls: dict[int, dict[str, Any]] = {}
         usage = None
+        finish_reason = None
         first_token_ms: Optional[float] = None
         async for chunk in stream:
             usage = getattr(chunk, "usage", None) or usage
             choices = list(getattr(chunk, "choices", None) or [])
             if not choices:
                 continue
+            finish_reason = getattr(choices[0], "finish_reason", None) or finish_reason
             delta = getattr(choices[0], "delta", None)
             if delta is None:
                 continue
@@ -277,6 +270,7 @@ class OpenAIModel:
             usage=_usage_dict(usage),
             thinking=thinking,
             metrics=metrics or None,
+            finish_reason=finish_reason,
         )
 
 

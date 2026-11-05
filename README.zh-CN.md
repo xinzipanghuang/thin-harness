@@ -357,16 +357,14 @@ Agent 自身也持有时间状态：每个 `Agent` 实例暴露 `started_at`、
 `agent.environment` 和 `ToolContext` 上，模型和工具无需自行探测就能适配
 当前平台。
 
-循环在运行开始时把先前的 Turn 和 Fact 加载进上下文——最近的
-`history_recent_turns`（默认 3）轮全文展示，更早的轮次压成一行摘要
-（`CONVERSATION SUMMARY`）——把命中的经验注入为 `RELEVANT EXPERIENCE`，
-结束时保存本次运行。完成且调用过工具的运行结束后，模型会把本次运行提炼
+循环按时间顺序逐条发送历史 `user` 和 `assistant` 消息，随后接上本轮用户问题。
+对于以问答对存储的历史，最近 `history_recent_turns`（默认 3）轮保留原文，
+更早的消息截短后仍按角色发送。运行环境、已验证事实和命中的经验放进
+`system` 消息。完成且调用过工具的运行结束后，模型会把本次运行提炼
 成一条 JSON 经验（`daily.forget` 删除错误经验，`daily.experiences` 查看
 经验库）。用相同 `--session` 重启 `python -m chat` 即可记住对话。
 
-“最近”是显式的：历史轮次用会话内全局编号标注，渲染末尾会点明最新一轮，
-`CURRENT USER REQUEST` 永远放在最后一段；`VERIFIED FACTS` 只注入最近
-`max_facts`（默认 15）条，避免陈旧话题淹没当前话题。
+`VERIFIED FACTS` 只注入最近 `max_facts`（默认 15）条。
 
 调试记录保持可信：`Turn.seq` 迁移为 `AUTOINCREMENT`（清空会话后不再复用
 轮次号），启动时 `Memory` 自动清理指向已删除 turn 或时间戳不可能的事件；
@@ -494,7 +492,7 @@ experimental 阶段的 MCP 原生 Tasks。
 - `max_consecutive_failures` —— 持续失败即终止；
 - `final_regenerate` —— 确定性防护在模型回答前终止循环时，基于编号证据做一次
   无工具终局生成；正常完成的答案直接返回；
-- `token_budget_tokens`（ContextConfig）—— 设置后，估算上下文（bytes/4）
+- `token_budget_tokens`（ContextConfig）—— 设置后，估算上下文 token 数，
   超预算会注入停止提示；每次调用的 debug 含 TTFT（`connect_ms` /
   `ttft_ms`）。
 
@@ -518,10 +516,9 @@ Agent、记忆、文档窗口读取，以及终端聊天（总线、worker、渲
 
 - 已有封闭式 typed Skill 合约与 Registry；Workflow 执行器、远程 Provider、
   planner/critic agent、多 Agent 编排、语义路由和 embedding 工具选择仍未实现。
-- Artifact 单次运行内驻留内存（磁盘持久化是未来扩展）。
+- Artifact 默认驻留内存。调用方可提供历史 Artifact 查询；WES Center 使用 SQLite 持久化。
 - 事实提取只做显式记录（`ctx.record_fact`）；没有自动 critic。
-- 历史压缩暂缓：最近轮次全文保留、更早的裁剪、token 预算按 bytes/4 估算；
-  完整的摘要式压缩（compaction）是超长会话场景下已文档化的下一步。
+- CLI 对旧问答对仍使用原有裁剪规则。WES Center 使用按 token 预算触发的会话摘要。
 
 ## 开源协议
 
