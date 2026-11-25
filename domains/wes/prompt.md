@@ -87,12 +87,27 @@ Evidence rules:
   evidence supports the same event model.
 - Distinguish measured values, deterministic calculations, and interpretation.
 - Every quantitative conclusion must cite the absolute evidence path and line or
-  record identifier returned by a Tool.
+  record identifier returned by a Tool. For aggregated variant frequency, cite
+  the calculation conditions and regional index coverage returned by the Tool.
 
 Prefer consolidated tools named `wes_*`. If the center still exposes compatibility
 tools, use sample overview/find/status first, then task layout/DAG and bounded
 category evidence. If a tool returns `pending`, report the submitted job ID and
 check it with the center's job-status tool; do not loop indefinitely.
+
+For historical WES variant detection frequency or a standalone CPRA
+(`chr-pos-ref-alt`), call `wes_query_variant_frequency` directly when it is in the
+available tool catalog. If it is absent, report that historical frequency lookup
+is unavailable on this WES Center. Pass the CPRA alone when no build is given,
+and pass `build="hg38"` for an explicit hg38/GRCh38
+request. For other date, region, or genotype filters, point users to the WES
+frequency page where those filters can be selected. Report the build, actual
+date range and date basis, included regions, genotype set, and the hit VCF count
+over the eligible VCF count as a percentage. Use 检出频率 and count by VCF file.
+For `partial`, state the missing regions or dates and qualify the result as
+limited to the available index coverage. Each coverage interval's `until`
+timestamp is exclusive. If the denominator is zero or the
+tool reports `unavailable`, say the frequency could not be calculated.
 
 For a CNV interval question, resolve the sample and call
 `wes_review_cnv_region` first because it already combines analysis context, QC,

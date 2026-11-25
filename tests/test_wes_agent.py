@@ -1,9 +1,10 @@
+import os
 import unittest
 from unittest.mock import patch
 
 from core.model import EchoModel, ScriptedModel
 from core.tool import Tool
-from core.types import ModelResponse, ToolCall, ToolResult
+from core.types import ModelResponse, RuntimeConfig, ToolCall, ToolResult
 from domains.wes.agent import WESAgent
 
 
@@ -27,6 +28,16 @@ class CompatibilityProvider(FakeProvider):
 
 
 class WESAgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_limits_can_be_configured_without_overriding_explicit_runtime(self):
+        with patch.dict(os.environ, {"WES_MAX_STEPS": "72", "WES_MAX_TOOL_CALLS": "180", "WES_REQUEST_TIMEOUT": "2100"}):
+            agent = WESAgent(model=EchoModel())
+            self.assertEqual((agent.runtime.max_steps, agent.runtime.max_tool_calls, agent.runtime.request_timeout), (72, 180, 2100))
+            explicit = WESAgent(model=EchoModel(), runtime=RuntimeConfig(max_steps=2, max_tool_calls=3, request_timeout=4))
+            self.assertEqual((explicit.runtime.max_steps, explicit.runtime.max_tool_calls, explicit.runtime.request_timeout), (2, 3, 4))
+        with patch.dict(os.environ, {"WES_MAX_TOOL_CALLS": "0"}):
+            with self.assertRaisesRegex(ValueError, "WES_MAX_TOOL_CALLS"):
+                WESAgent(model=EchoModel())
+
     async def test_prompt_supports_wes_knowledge_usage_and_scope_boundaries(self):
         agent = WESAgent(model=EchoModel())
         self.assertIn("questions about using this product", agent.system_prompt)

@@ -18,14 +18,22 @@ class WESAgent(Agent):
     prompt_paths = ["prompts/agent.md", "domains/wes/prompt.md"]
     tool_packages = ["tools"]
     tool_include = ["artifacts.read"]
-    max_steps = 14
-    max_tool_calls = 24
+    max_steps = 64
+    max_tool_calls = 160
+    request_timeout = 1800
     tool_timeout = 120
     max_consecutive_failures = 3
     keep_recent_observations = 10
     experience_enabled = False
 
     def __init__(self, *args, **kwargs) -> None:
+        for setting, variable in (("max_steps", "WES_MAX_STEPS"),
+                                  ("max_tool_calls", "WES_MAX_TOOL_CALLS"),
+                                  ("request_timeout", "WES_REQUEST_TIMEOUT")):
+            value = int(get_env(variable) or getattr(self, setting))
+            if value < 1:
+                raise ValueError(f"{variable} must be a positive integer")
+            setattr(self, setting, value)
         super().__init__(*args, **kwargs)
         self._mcp_loaded = False
         self._mcp_error: str | None = None

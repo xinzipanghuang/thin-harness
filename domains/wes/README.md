@@ -26,7 +26,14 @@ Optional settings:
 WES_MCP_TOKEN_ENV=WES_MCP_TOKEN
 WES_MCP_CONNECT_TIMEOUT=5
 WES_MCP_CALL_TIMEOUT=120
+WES_MAX_STEPS=64
+WES_MAX_TOOL_CALLS=160
+WES_REQUEST_TIMEOUT=1800
 ```
+
+The execution budget defaults to 64 model steps, 160 tool calls and 1800 seconds
+per request. Explicit constructor runtime settings take precedence over these
+environment variables.
 
 The Agent prefers consolidated `wes_*` tools. If none exist, it loads the
 center's current compatibility catalog so the integration can be tested during
